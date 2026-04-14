@@ -67,8 +67,8 @@ pipeline {
                     sh '''
                         export PATH="${CARGO_HOME}/bin:/usr/local/bin:${PATH}"
 
-                        RUST_VERSION="$(./scripts/ci/rust-version.sh)"
-                        CARGO_LAMBDA_VERSION="$(./scripts/ci/cargo-lambda-version.sh)"
+                        RUST_VERSION="$(bash ./scripts/ci/rust-version.sh)"
+                        CARGO_LAMBDA_VERSION="$(bash ./scripts/ci/cargo-lambda-version.sh)"
 
                         echo "=== Installing / verifying Rust ${RUST_VERSION} ==="
                         rustup toolchain install "${RUST_VERSION}" \
