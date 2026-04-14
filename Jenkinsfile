@@ -46,9 +46,14 @@ pipeline {
     // Environment — all cache lives on the agent filesystem, no S3 cache.
     // -------------------------------------------------------------------------
     environment {
-        RUSTUP_HOME      = '/var/cache/jenkins/rustup'
-        CARGO_HOME       = '/var/cache/jenkins/cargo'
-        CARGO_TARGET_DIR = '/var/cache/jenkins/cargo-target'
+        RUSTUP_HOME = '/var/cache/jenkins/rustup'
+        CARGO_HOME  = '/var/cache/jenkins/cargo'
+
+        // Per-project target dirs — prevents cargo's file lock from serializing
+        // the two parallel builds. Registry + git deps are still shared (read-only
+        // after first fetch, so safe to share).
+        CARGO_TARGET_DIR_ENSURE  = '/var/cache/jenkins/cargo-target-ensure-cloud'
+        CARGO_TARGET_DIR_SENTRICS = '/var/cache/jenkins/cargo-target-sentrics-core'
 
         CARGO_BUILD_JOBS                    = '4'
         CARGO_REGISTRIES_CRATES_IO_PROTOCOL = 'sparse'
@@ -109,9 +114,10 @@ pipeline {
                         dir('ensure-cloud') {
                             sh '''
                                 export PATH="${CARGO_HOME}/bin:/usr/local/bin:${PATH}"
+                                export CARGO_TARGET_DIR="${CARGO_TARGET_DIR_ENSURE}"
                                 COMMIT_HASH="$(echo "${RELEASE_SHA:-${GIT_COMMIT}}" | cut -c1-12)"
 
-                                echo "=== Cache size ==="
+                                echo "=== Cache size (ensure-cloud) ==="
                                 du -sh "${CARGO_TARGET_DIR}/" 2>/dev/null || echo "cold"
 
                                 echo "Building headend-api..."
@@ -142,9 +148,10 @@ pipeline {
                         dir('sentrics-core') {
                             sh '''
                                 export PATH="${CARGO_HOME}/bin:/usr/local/bin:${PATH}"
+                                export CARGO_TARGET_DIR="${CARGO_TARGET_DIR_SENTRICS}"
                                 COMMIT_HASH="$(echo "${RELEASE_SHA:-${GIT_COMMIT}}" | cut -c1-12)"
 
-                                echo "=== Cache size ==="
+                                echo "=== Cache size (sentrics-core) ==="
                                 du -sh "${CARGO_TARGET_DIR}/" 2>/dev/null || echo "cold"
 
                                 echo "Building resources-api and migrate..."
@@ -190,7 +197,7 @@ pipeline {
 
                 stage('headend-gateway') {
                     steps {
-                        dir('ensure-cloud/headend-gateway') {
+                        dir('ensure-cloud/headend-gateway/infra/headend-gateway') {
                             sh '''
                                 docker build -t headend-gateway:"${GIT_COMMIT}" .
                                 mkdir -p "${WORKSPACE}/docker-out"
@@ -231,7 +238,8 @@ pipeline {
                     steps {
                         dir('sentrics-core') {
                             sh '''
-                                docker build -t yardi-sync:"${GIT_COMMIT}" -f yardi-sync/Dockerfile .
+                                docker build -t yardi-sync:"${GIT_COMMIT}" \
+                                    -f yardi-sync/infra/yardi-sync/Dockerfile .
                                 mkdir -p "${WORKSPACE}/docker-out"
                                 docker save yardi-sync:"${GIT_COMMIT}" \
                                     | gzip > "${WORKSPACE}/docker-out/yardi-sync.tar.gz"
@@ -337,10 +345,12 @@ pipeline {
             steps {
                 sh '''
                     echo "=== CARGO CACHE STATS ==="
-                    echo "Target dir  : $(du -sh "${CARGO_TARGET_DIR}/" 2>/dev/null || echo empty)"
-                    echo "Registry    : $(du -sh "${CARGO_HOME}/registry/" 2>/dev/null || echo empty)"
-                    echo "Git deps    : $(du -sh "${CARGO_HOME}/git/" 2>/dev/null || echo empty)"
-                    echo "rlib count  : $(find "${CARGO_TARGET_DIR}/" -name "*.rlib" 2>/dev/null | wc -l)"
+                    echo "ensure-cloud target  : $(du -sh "${CARGO_TARGET_DIR_ENSURE}/" 2>/dev/null || echo empty)"
+                    echo "sentrics-core target : $(du -sh "${CARGO_TARGET_DIR_SENTRICS}/" 2>/dev/null || echo empty)"
+                    echo "Registry             : $(du -sh "${CARGO_HOME}/registry/" 2>/dev/null || echo empty)"
+                    echo "Git deps             : $(du -sh "${CARGO_HOME}/git/" 2>/dev/null || echo empty)"
+                    echo "rlib count (ensure)  : $(find "${CARGO_TARGET_DIR_ENSURE}/" -name "*.rlib" 2>/dev/null | wc -l)"
+                    echo "rlib count (sentrics): $(find "${CARGO_TARGET_DIR_SENTRICS}/" -name "*.rlib" 2>/dev/null | wc -l)"
                     echo "========================="
                 '''
             }
