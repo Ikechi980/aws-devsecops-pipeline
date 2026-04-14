@@ -1,0 +1,108 @@
+name: Development Merge Gates
+
+on:
+  push:
+    branches:
+      - development
+  pull_request:
+    branches:
+      - development
+
+concurrency:
+  group: development-merge-gates
+  cancel-in-progress: false
+
+jobs:
+  security_scan:
+    name: security-scan
+    runs-on: [self-hosted, Linux, X64]
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check runner prerequisites
+        run: ./scripts/ci/prereqs.sh security
+
+      - name: Run security gate
+        run: ./scripts/check.sh security
+
+  lint:
+    name: lint
+    runs-on: [self-hosted, Linux, X64]
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Bootstrap Rust PATH
+        run: |
+          echo "/home/ubuntu/.cargo/bin" >> "$GITHUB_PATH"
+          source "$HOME/.cargo/env" 2>/dev/null || true
+          command -v cargo
+          command -v rustc
+          command -v rustup
+
+      - name: Use pinned Rust toolchain
+        run: |
+          RUST_VERSION="$(./scripts/ci/rust-version.sh)"
+          rustup toolchain install "$RUST_VERSION" --profile minimal --component rustfmt --component clippy
+          rustup override set "$RUST_VERSION"
+          rustc --version
+          cargo --version
+
+      - name: Check runner prerequisites
+        run: ./scripts/ci/prereqs.sh lint
+
+      - name: Run lint gate
+        run: ./scripts/check.sh lint
+
+  integration_tests:
+    name: integration-tests
+    runs-on: [self-hosted, Linux, X64]
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Bootstrap Rust PATH
+        run: |
+          echo "/home/ubuntu/.cargo/bin" >> "$GITHUB_PATH"
+          source "$HOME/.cargo/env" 2>/dev/null || true
+          command -v cargo
+          command -v rustc
+          command -v rustup
+
+      - name: Use pinned Rust toolchain
+        run: |
+          RUST_VERSION="$(./scripts/ci/rust-version.sh)"
+          rustup toolchain install "$RUST_VERSION" --profile minimal --component rustfmt --component clippy
+          rustup override set "$RUST_VERSION"
+          rustc --version
+          cargo --version
+
+      - name: Install pinned cargo-lambda
+        run: |
+          CARGO_LAMBDA_VERSION="$(./scripts/ci/cargo-lambda-version.sh)"
+          if ! cargo lambda --version 2>/dev/null | grep -q " ${CARGO_LAMBDA_VERSION} "; then
+            cargo install cargo-lambda --locked --version "$CARGO_LAMBDA_VERSION"
+          fi
+          cargo lambda --version
+
+      - name: Check runner prerequisites
+        run: ./scripts/ci/prereqs.sh test
+
+      - name: Run integration test gate
+        run: ./scripts/check.sh test

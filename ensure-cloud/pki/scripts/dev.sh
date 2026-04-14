@@ -1,0 +1,182 @@
+#!/bin/bash
+set -e
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/common.sh"
+
+PROJECT_ROOT="$SCRIPT_DIR/.."
+
+usage() {
+    echo "Usage: $0 [deps|run|test]"
+    echo "  deps - Start infra and tail logs"
+    echo "  run  - Start infra and run pki"
+    echo "  test - Start infra, run pki, run tests, then tear down"
+    echo ""
+    echo "Options:"
+    echo "  --reset - Reset infra before starting (run/test/deps)"
+    exit 1
+}
+
+cleanup() {
+    local status=$?
+    trap - EXIT INT TERM
+    if [[ -n "${PKI_PID:-}" ]]; then
+        stop_process_group "$PKI_PID"
+    fi
+    if [[ -n "${LOGS_PID:-}" ]]; then
+        kill "$LOGS_PID" 2>/dev/null || true
+    fi
+    infra_down || true
+    release_lock || true
+    exit $status
+}
+
+ensure_env_file() {
+    if [[ ! -f "$PROJECT_ROOT/.env" ]]; then
+        echo "Creating .env from .env.example..."
+        cp "$PROJECT_ROOT/.env.example" "$PROJECT_ROOT/.env"
+    fi
+}
+
+update_provisioner_key_id() {
+    local ca_config="$REPO_ROOT/infra/stepca/data/config/ca.json"
+    if [ ! -f "$ca_config" ]; then
+        return 0
+    fi
+
+    local kid
+    kid=$(jq -r '.authority.provisioners[0].key.kid // empty' "$ca_config")
+    if [ -z "$kid" ]; then
+        return 0
+    fi
+
+    local current
+    current=$(grep -m 1 "^STEP_CA_PROVISIONER_KEY_ID=" "$PROJECT_ROOT/.env" 2>/dev/null | cut -d= -f2- || true)
+    if [ "$current" != "$kid" ]; then
+        echo "Setting STEP_CA_PROVISIONER_KEY_ID in .env..."
+        if grep -q "^STEP_CA_PROVISIONER_KEY_ID=" "$PROJECT_ROOT/.env"; then
+            sed -i "s/^STEP_CA_PROVISIONER_KEY_ID=.*/STEP_CA_PROVISIONER_KEY_ID=${kid}/" "$PROJECT_ROOT/.env"
+        else
+            echo "STEP_CA_PROVISIONER_KEY_ID=${kid}" >> "$PROJECT_ROOT/.env"
+        fi
+    fi
+}
+start_infra_logs() {
+    tail_infra_logs &
+    LOGS_PID=$!
+}
+
+prebuild_artifacts() {
+    echo "Prebuilding run binary..."
+    (cd "$PROJECT_ROOT" && cargo build --bin pki-api)
+
+    echo "Prebuilding test artifacts..."
+    (cd "$PROJECT_ROOT" && cargo test --no-run)
+}
+
+wait_for_health() {
+    local url="http://${LOOPBACK_HOST}:8080/v1/health"
+    local log_file="${1:-}"
+    local attempts=180
+    local delay=1
+
+    for _ in $(seq 1 "$attempts"); do
+        if curl -s "$url" >/dev/null 2>&1; then
+            return 0
+        fi
+        if [[ -n "${PKI_PID:-}" ]] && ! kill -0 "$PKI_PID" 2>/dev/null; then
+            echo "Error: pki exited before becoming ready"
+            if [[ -n "$log_file" ]]; then
+                print_log_tail "$log_file"
+            fi
+            exit 1
+        fi
+        sleep "$delay"
+    done
+
+    echo "Error: pki did not become ready at $url"
+    if [[ -n "$log_file" ]]; then
+        print_log_tail "$log_file"
+    fi
+    exit 1
+}
+
+deps() {
+    local reset_flag="${2:-}"
+    acquire_lock "pki deps"
+    trap cleanup EXIT INT TERM
+
+    if [[ "$reset_flag" == "--reset" ]]; then
+        infra_reset
+    fi
+
+    check_docker
+    require_ports_free 4666 8080 8081 8443 9100
+    ensure_dev_ca
+    ensure_nginx_server_cert
+    infra_up
+    ensure_env_file
+    update_provisioner_key_id
+
+    echo "Dependencies are running. Tailing logs (Ctrl-C to stop)..."
+    tail_infra_logs
+}
+
+run() {
+    local reset_flag="${2:-}"
+    acquire_lock "pki run"
+    trap cleanup EXIT INT TERM
+
+    if [[ "$reset_flag" == "--reset" ]]; then
+        infra_reset
+    fi
+
+    check_docker
+    require_ports_free 4666 8080 8081 8443 9100
+    ensure_dev_ca
+    ensure_nginx_server_cert
+    infra_up
+    ensure_env_file
+    update_provisioner_key_id
+    start_infra_logs
+
+    echo "Starting pki (Ctrl-C to stop)..."
+    cd "$PROJECT_ROOT"
+    cargo run
+}
+
+test() {
+    local reset_flag="${2:-}"
+    acquire_lock "pki test"
+    trap cleanup EXIT INT TERM
+
+    if [[ "$reset_flag" == "--reset" ]]; then
+        infra_reset
+    fi
+
+    check_docker
+    require_ports_free 4666 8080 8081 8443 9100
+    ensure_dev_ca
+    ensure_nginx_server_cert
+    infra_up
+    ensure_env_file
+    update_provisioner_key_id
+
+    prebuild_artifacts
+
+    echo "Starting pki for tests..."
+    local log_file="$DEV_LOG_DIR/pki.test.log"
+    PKI_PID=$(start_bg "$log_file" bash -c "cd \"$PROJECT_ROOT\" && cargo run")
+
+    wait_for_health "$log_file"
+
+    echo "Running tests..."
+    (cd "$PROJECT_ROOT" && cargo test)
+}
+
+case "${1:-}" in
+    deps) deps "$@" ;;
+    run)  run "$@" ;;
+    test) test "$@" ;;
+    *)    usage ;;
+esac

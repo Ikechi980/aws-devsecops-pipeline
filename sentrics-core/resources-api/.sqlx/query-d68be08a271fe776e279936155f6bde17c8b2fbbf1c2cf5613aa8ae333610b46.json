@@ -1,0 +1,58 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT id, name, yardi_org_id, yardi_api_key, yardi_api_secret, yardi_api_base_url, yardi_token_url FROM communities WHERE id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "yardi_org_id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "yardi_api_key",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "yardi_api_secret",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "yardi_api_base_url",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "yardi_token_url",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "d68be08a271fe776e279936155f6bde17c8b2fbbf1c2cf5613aa8ae333610b46"
+}

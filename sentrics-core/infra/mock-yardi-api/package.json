@@ -1,0 +1,12 @@
+{
+  "name": "mock-yardi-api",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Local mock for the external Yardi FHIR API",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.21.2"
+  }
+}

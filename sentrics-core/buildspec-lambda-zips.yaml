@@ -1,0 +1,165 @@
+version: 0.2
+
+env:
+  variables:
+    CARGO_TARGET_DIR: "/root/.cache/cargo-target"
+    S3_BUCKET: sentrics-ensure-lambda-artifacts-truststore
+    S3_PREFIX: lambda-artifacts
+    QUARANTINE_BUCKET: "sentrics-ensure-terraform-state-codepipeline-cache"
+    QUARANTINE_PREFIX: "sentrics-core-security-quarantine"
+    CARGO_BUILD_JOBS: "4"
+    CARGO_REGISTRIES_CRATES_IO_PROTOCOL: "sparse"
+    LAMBDA_API_NAME: "sentrics-core-resources-api"
+    LAMBDA_MIGRATE_NAME: "sentrics-core-db-migration"
+    LAMBDA_CHANGE_LOGGER_NAME: "sentrics-core-resources-change-logger"
+
+phases:
+  install:
+    commands:
+      - echo "Using prebuilt build image for Rust/cargo-lambda/sccache/Zig"
+      - |
+        if ! command -v aws >/dev/null 2>&1; then
+          echo "Installing AWS CLI"
+          yum install -y awscli
+        fi
+      - aws --version
+      - |
+        if ! command -v curl >/dev/null 2>&1; then
+          yum install -y curl
+        fi
+      - |
+        if ! command -v rustup >/dev/null 2>&1; then
+          curl https://sh.rustup.rs -sSf | sh -s -- -y --default-toolchain none --profile minimal
+        fi
+
+  pre_build:
+    commands:
+      - export PATH="/root/.cargo/bin:${PATH}"
+      # Check existing cache before building
+      - echo "=== CHECKING TARGET CACHE ==="
+      - echo "Target directory size:"
+      - du -sh ${CARGO_TARGET_DIR}/ || echo "No target directory"
+      - echo "Cached files:"
+      - find ${CARGO_TARGET_DIR}/ -name "*.rlib" -o -name "*.so" -o -name "*.a" | wc -l
+      - |
+        if [ -d "${CARGO_TARGET_DIR}" ] && [ "$(ls -A ${CARGO_TARGET_DIR} 2>/dev/null)" ]; then
+          echo "CACHE_STATUS: hit (${CARGO_TARGET_DIR})"
+        else
+          echo "CACHE_STATUS: miss (${CARGO_TARGET_DIR})"
+        fi
+      - echo "=== END CACHE CHECK ==="
+      - echo "=== CHECKING CARGO HOME CACHE ==="
+      - ls -la /root/.cargo || echo "Cargo home not found"
+      - |
+        if [ -d "/root/.cargo" ] && [ "$(ls -A /root/.cargo 2>/dev/null)" ]; then
+          echo "CACHE_STATUS: hit (/root/.cargo)"
+        else
+          echo "CACHE_STATUS: miss (/root/.cargo)"
+        fi
+      - echo "=== END CARGO HOME CHECK ==="
+      
+      - echo "Preparing build variables"
+      - export RUST_VERSION="$(./scripts/ci/rust-version.sh)"
+      - export CARGO_LAMBDA_VERSION="$(./scripts/ci/cargo-lambda-version.sh)"
+      - rustup toolchain install "${RUST_VERSION}" --profile minimal --component rustfmt --component clippy
+      - rustup override set "${RUST_VERSION}"
+      - |
+        if ! cargo lambda --version 2>/dev/null | grep -q " ${CARGO_LAMBDA_VERSION} "; then
+          cargo install cargo-lambda --locked --version "${CARGO_LAMBDA_VERSION}"
+        fi
+      - rustc --version
+      - cargo --version
+      - cargo lambda --version
+      - |
+        if ! rustc --version | grep -q " ${RUST_VERSION} "; then
+          echo "ERROR: rustc version does not match required ${RUST_VERSION}"
+          exit 1
+        fi
+      - |
+        if ! cargo --version | grep -q " ${RUST_VERSION} "; then
+          echo "ERROR: cargo version does not match required ${RUST_VERSION}"
+          exit 1
+        fi
+      - API_ZIP="resources-api.zip"
+      - MIGRATE_ZIP="migrate.zip"
+      - CHANGE_LOGGER_ZIP="resources-change-logger.zip"
+      - COMMIT_HASH=$(echo $CODEBUILD_RESOLVED_SOURCE_VERSION | cut -c1-12)
+      - API_COMMIT_KEY="${S3_PREFIX}/resources-api/resources-api-${COMMIT_HASH}.zip"
+      - MIGRATE_COMMIT_KEY="${S3_PREFIX}/migrate/migrate-${COMMIT_HASH}.zip"
+      - CHANGE_LOGGER_COMMIT_KEY="${S3_PREFIX}/resources-change-logger/resources-change-logger-${COMMIT_HASH}.zip"
+      - 'if [ -z "${ENVIRONMENT}" ]; then echo "ERROR: ENVIRONMENT is required."; exit 1; fi'
+      - QUARANTINE_BASE="s3://${QUARANTINE_BUCKET}/${QUARANTINE_PREFIX}/${ENVIRONMENT}/${COMMIT_HASH}"
+      - QUARANTINE_LAMBDA_PREFIX="${QUARANTINE_BASE}/lambda"
+      - echo "Using quarantine lambda prefix ${QUARANTINE_LAMBDA_PREFIX}"
+      - echo "Checking cache directories..."
+      - ls -la ${CARGO_TARGET_DIR}/ || echo "Target cache not found"
+
+  build:
+    commands:
+      - echo "Building Lambda binaries with optimized caching"
+      - cd resources-api
+      
+      # Then build lambda binaries
+      - echo "Building Lambda binaries..."
+      - SQLX_OFFLINE=true cargo lambda build --release --output-format zip --compiler cargo --bin resources-api
+      - SQLX_OFFLINE=true cargo lambda build --release --output-format zip --compiler cargo --bin migrate
+      - cp ${CARGO_TARGET_DIR}/lambda/resources-api/bootstrap.zip ${API_ZIP}
+      - cp ${CARGO_TARGET_DIR}/lambda/migrate/bootstrap.zip ${MIGRATE_ZIP}
+      - cp ${API_ZIP} ..
+      - cp ${MIGRATE_ZIP} ..
+
+      - echo "Building resources-change-logger"
+      - cd ..
+      - cd resources-change-logger
+      - cargo lambda build --release --output-format zip --bin resources-change-logger
+      - cp ${CARGO_TARGET_DIR}/lambda/resources-change-logger/bootstrap.zip ${CHANGE_LOGGER_ZIP}
+      - cp ${CHANGE_LOGGER_ZIP} ..
+      - cd ..
+
+  post_build:
+    commands:
+      - echo "Creating lambda quarantine manifest (${COMMIT_HASH})"
+      - |
+        cat > lambda-manifest.json <<EOF
+        {
+          "artifacts": [
+            {
+              "deployable": "resources-api",
+              "file": "${API_ZIP}",
+              "s3_bucket": "${S3_BUCKET}",
+              "s3_key": "${API_COMMIT_KEY}"
+            },
+            {
+              "deployable": "migrate",
+              "file": "${MIGRATE_ZIP}",
+              "s3_bucket": "${S3_BUCKET}",
+              "s3_key": "${MIGRATE_COMMIT_KEY}"
+            },
+            {
+              "deployable": "resources-change-logger",
+              "file": "${CHANGE_LOGGER_ZIP}",
+              "s3_bucket": "${S3_BUCKET}",
+              "s3_key": "${CHANGE_LOGGER_COMMIT_KEY}"
+            }
+          ]
+        }
+        EOF
+      - echo "Uploading Lambda artifacts to quarantine (${COMMIT_HASH})"
+      - aws s3 cp ${API_ZIP} "${QUARANTINE_LAMBDA_PREFIX}/${API_ZIP}"
+      - aws s3 cp ${MIGRATE_ZIP} "${QUARANTINE_LAMBDA_PREFIX}/${MIGRATE_ZIP}"
+      - aws s3 cp ${CHANGE_LOGGER_ZIP} "${QUARANTINE_LAMBDA_PREFIX}/${CHANGE_LOGGER_ZIP}"
+      - aws s3 cp lambda-manifest.json "${QUARANTINE_LAMBDA_PREFIX}/lambda-manifest.json"
+      - echo "Quarantine upload complete"
+      
+      - echo "=== FINAL CACHE STATS ==="
+      - echo "Final target directory size:"
+      - du -sh ${CARGO_TARGET_DIR}/
+      - echo "Final cached files count:"
+      - find ${CARGO_TARGET_DIR}/ -name "*.rlib" -o -name "*.so" -o -name "*.a" | wc -l
+      - echo "=== END CACHE STATS ==="
+
+cache:
+  paths:
+    - /root/.cache/cargo-target/**/*
+    - /root/.cargo/registry/**/*
+    - /root/.cargo/git/**/*

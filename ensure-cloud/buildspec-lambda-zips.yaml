@@ -1,0 +1,153 @@
+version: 0.2
+
+env:
+  variables:
+    CARGO_TARGET_DIR: "/root/.cache/cargo-target"
+    S3_BUCKET: sentrics-ensure-lambda-artifacts-truststore
+    S3_PREFIX: lambda-artifacts
+    QUARANTINE_BUCKET: "sentrics-ensure-terraform-state-codepipeline-cache"
+    QUARANTINE_PREFIX: "ensure-cloud-security-quarantine"
+    CARGO_BUILD_JOBS: "4"
+    CARGO_REGISTRIES_CRATES_IO_PROTOCOL: "sparse"
+
+    LAMBDA_HEADEND_API_NAME: "headend-api"
+    LAMBDA_CORE_CHANGE_PUBLISHER_NAME: "core-change-publisher"
+
+phases:
+  install:
+    commands:
+      - echo "Using prebuilt build image for Rust/cargo-lambda/sccache/Zig"
+      - |
+        if ! command -v aws >/dev/null 2>&1; then
+          echo "Installing AWS CLI"
+          yum install -y awscli
+        fi
+      - aws --version
+      - |
+        if ! command -v curl >/dev/null 2>&1; then
+          yum install -y curl
+        fi
+      - |
+        if ! command -v rustup >/dev/null 2>&1; then
+          curl https://sh.rustup.rs -sSf | sh -s -- -y --default-toolchain none --profile minimal
+        fi
+
+  pre_build:
+    commands:
+      - export PATH="/root/.cargo/bin:${PATH}"
+      - echo "=== CHECKING TARGET CACHE ==="
+      - echo "Target directory size:"
+      - du -sh ${CARGO_TARGET_DIR}/ || echo "No target directory"
+      - echo "Cached files:"
+      - find ${CARGO_TARGET_DIR}/ -name "*.rlib" -o -name "*.so" -o -name "*.a" | wc -l
+      - |
+        if [ -d "${CARGO_TARGET_DIR}" ] && [ "$(ls -A ${CARGO_TARGET_DIR} 2>/dev/null)" ]; then
+          echo "CACHE_STATUS: hit (${CARGO_TARGET_DIR})"
+        else
+          echo "CACHE_STATUS: miss (${CARGO_TARGET_DIR})"
+        fi
+      - echo "=== END CACHE CHECK ==="
+      - echo "=== CHECKING CARGO HOME CACHE ==="
+      - ls -la /root/.cargo || echo "Cargo home not found"
+      - |
+        if [ -d "/root/.cargo" ] && [ "$(ls -A /root/.cargo 2>/dev/null)" ]; then
+          echo "CACHE_STATUS: hit (/root/.cargo)"
+        else
+          echo "CACHE_STATUS: miss (/root/.cargo)"
+        fi
+      - echo "=== END CARGO HOME CHECK ==="
+
+      - echo "Preparing build variables"
+      - export RUST_VERSION="$(./scripts/ci/rust-version.sh)"
+      - export CARGO_LAMBDA_VERSION="$(./scripts/ci/cargo-lambda-version.sh)"
+      - rustup toolchain install "${RUST_VERSION}" --profile minimal --component rustfmt --component clippy
+      - rustup override set "${RUST_VERSION}"
+      - |
+        if ! cargo lambda --version 2>/dev/null | grep -q " ${CARGO_LAMBDA_VERSION} "; then
+          cargo install cargo-lambda --locked --version "${CARGO_LAMBDA_VERSION}"
+        fi
+      - rustc --version
+      - cargo --version
+      - cargo lambda --version
+      - |
+        if ! rustc --version | grep -q " ${RUST_VERSION} "; then
+          echo "ERROR: rustc version does not match required ${RUST_VERSION}"
+          exit 1
+        fi
+      - |
+        if ! cargo --version | grep -q " ${RUST_VERSION} "; then
+          echo "ERROR: cargo version does not match required ${RUST_VERSION}"
+          exit 1
+        fi
+      - export EFFECTIVE_RELEASE_SHA="${RELEASE_SHA:-${CODEBUILD_RESOLVED_SOURCE_VERSION:-}}"
+      - 'if [ -z "${EFFECTIVE_RELEASE_SHA}" ]; then echo "ERROR: RELEASE_SHA/CODEBUILD_RESOLVED_SOURCE_VERSION is empty."; exit 1; fi'
+      - export COMMIT_HASH="$(echo "${EFFECTIVE_RELEASE_SHA}" | cut -c1-12)"
+      - 'if [ -z "${ENVIRONMENT}" ]; then echo "ERROR: ENVIRONMENT is required."; exit 1; fi'
+      - export HEADEND_API_ZIP="headend-api.zip"
+      - export CORE_CHANGE_PUBLISHER_ZIP="core-change-publisher.zip"
+      - export HEADEND_API_COMMIT_KEY="${S3_PREFIX}/headend-api/headend-api-${COMMIT_HASH}.zip"
+      - export CORE_CHANGE_PUBLISHER_COMMIT_KEY="${S3_PREFIX}/core-change-publisher/core-change-publisher-${COMMIT_HASH}.zip"
+
+  build:
+    commands:
+      - echo "Building headend-api"
+      - cd headend-api
+      - cargo lambda build --release --output-format zip --bin ${LAMBDA_HEADEND_API_NAME}
+      - cp ${CARGO_TARGET_DIR}/lambda/${LAMBDA_HEADEND_API_NAME}/bootstrap.zip ../${HEADEND_API_ZIP}
+
+      - echo "Building core-change-publisher"
+      - cd ..
+      - cd core-change-publisher
+      - cargo lambda build --release --output-format zip --bin ${LAMBDA_CORE_CHANGE_PUBLISHER_NAME}
+      - cp ${CARGO_TARGET_DIR}/lambda/${LAMBDA_CORE_CHANGE_PUBLISHER_NAME}/bootstrap.zip ../${CORE_CHANGE_PUBLISHER_ZIP}
+
+  post_build:
+    commands:
+      - cd ${CODEBUILD_SRC_DIR}
+      - mkdir -p out
+      - mv ${HEADEND_API_ZIP} out/${HEADEND_API_ZIP}
+      - mv ${CORE_CHANGE_PUBLISHER_ZIP} out/${CORE_CHANGE_PUBLISHER_ZIP}
+      - |
+        cat > out/lambda-manifest.json <<EOF
+        {
+          "artifact_type": "lambda_zip_bundle",
+          "release_sha": "${COMMIT_HASH}",
+          "artifacts": [
+            {
+              "deployable": "headend-api",
+              "file": "${HEADEND_API_ZIP}",
+              "s3_bucket": "${S3_BUCKET}",
+              "s3_key": "${HEADEND_API_COMMIT_KEY}"
+            },
+            {
+              "deployable": "core-change-publisher",
+              "file": "${CORE_CHANGE_PUBLISHER_ZIP}",
+              "s3_bucket": "${S3_BUCKET}",
+              "s3_key": "${CORE_CHANGE_PUBLISHER_COMMIT_KEY}"
+            }
+          ]
+        }
+        EOF
+      - echo "Lambda artifacts prepared for security stage"
+      - export QUARANTINE_BASE="s3://${QUARANTINE_BUCKET}/${QUARANTINE_PREFIX}/${ENVIRONMENT}/${COMMIT_HASH}/lambda"
+      - aws s3 cp out/${HEADEND_API_ZIP} "${QUARANTINE_BASE}/${HEADEND_API_ZIP}"
+      - aws s3 cp out/${CORE_CHANGE_PUBLISHER_ZIP} "${QUARANTINE_BASE}/${CORE_CHANGE_PUBLISHER_ZIP}"
+      - aws s3 cp out/lambda-manifest.json "${QUARANTINE_BASE}/lambda-manifest.json"
+      - echo "Uploaded quarantine lambda artifacts to ${QUARANTINE_BASE}"
+
+      - echo "=== FINAL CACHE STATS ==="
+      - echo "Final target directory size:"
+      - du -sh ${CARGO_TARGET_DIR}/
+      - echo "Final cached files count:"
+      - find ${CARGO_TARGET_DIR}/ -name "*.rlib" -o -name "*.so" -o -name "*.a" | wc -l
+      - echo "=== END CACHE STATS ==="
+
+artifacts:
+  files:
+    - out/**/*
+
+cache:
+  paths:
+    - /root/.cache/cargo-target/**/*
+    - /root/.cargo/registry/**/*
+    - /root/.cargo/git/**/*

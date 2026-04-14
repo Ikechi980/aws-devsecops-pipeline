@@ -1,0 +1,148 @@
+version: 0.2
+
+phases:
+  pre_build:
+    commands:
+      - echo "Installing dependencies"
+      - yum update -y
+      - yum install -y yum-utils jq unzip zip python3-pip
+      - yum-config-manager --add-repo https://rpm.releases.hashicorp.com/AmazonLinux/hashicorp.repo
+      - yum install -y terraform
+      - terraform --version
+      - pip3 install botocore boto3 packaging awscli
+
+      - echo "Configuring Git"
+      - export GIT_USER_EMAIL=$(aws ssm get-parameter --name "/git_sentrics/credentials/GIT_USER_EMAIL" --query "Parameter.Value" --output text || echo "Parameter not found")
+      - export GIT_USERNAME=$(aws ssm get-parameter --name "/git_sentrics/credentials/GIT_USERNAME" --query "Parameter.Value" --output text || echo "Parameter not found")
+      - export PAT_TOKEN=$(aws ssm get-parameter --name "/git_sentrics/credentials/github/PAT_TOKEN" --with-decryption --query "Parameter.Value" --output text)
+      - git config --global user.name "$GIT_USERNAME"
+      - git config --global user.email "$GIT_USER_EMAIL"
+      - git config --global credential.helper 'store --file ~/.git-credentials'
+      - echo "https://$GIT_USERNAME:$PAT_TOKEN@github.com" > ~/.git-credentials
+
+      - export ACCOUNT_ID=$(aws sts get-caller-identity --query "Account" --output text)
+      - export REQUIRE_COMMIT_ARTIFACTS="${REQUIRE_COMMIT_ARTIFACTS:-false}"
+      - export BOOTSTRAP_ALLOW_MISSING_ARTIFACTS="${BOOTSTRAP_ALLOW_MISSING_ARTIFACTS:-true}"
+      - export EFFECTIVE_RELEASE_SHA="${RELEASE_SHA:-${CODEBUILD_RESOLVED_SOURCE_VERSION:-}}"
+      - 'if [ -z "${EFFECTIVE_RELEASE_SHA}" ]; then echo "WARN: RELEASE_SHA/CODEBUILD_RESOLVED_SOURCE_VERSION is empty. Falling back to latest."; export RELEASE_SHA_SHORT="latest"; else export RELEASE_SHA_SHORT=$(echo "${EFFECTIVE_RELEASE_SHA}" | cut -c1-12); fi'
+      - export EFFECTIVE_AWS_REGION="${AWS_DEFAULT_REGION:-${AWS_REGION:-}}"
+      - 'if [ -z "${EFFECTIVE_AWS_REGION}" ]; then echo "ERROR: AWS_DEFAULT_REGION/AWS_REGION is empty."; exit 1; fi'
+      - 'if [ "${ENVIRONMENT}" = "prod" ]; then echo "INFO: ENVIRONMENT=prod, enforcing strict artifact policy"; export BOOTSTRAP_ALLOW_MISSING_ARTIFACTS="false"; export REQUIRE_COMMIT_ARTIFACTS="true"; fi'
+      - export YARDI_IMAGE_REPO_NAME="${YARDI_IMAGE_REPO_NAME:-sentrics-core-yardi-sync-repo}"
+      - export LAMBDA_ARTIFACT_BUCKET="${LAMBDA_ARTIFACT_BUCKET:-sentrics-ensure-lambda-artifacts-truststore}"
+      - export LAMBDA_BOOTSTRAP_PLACEHOLDER_KEY="${LAMBDA_BOOTSTRAP_PLACEHOLDER_KEY:-lambda-artifacts/bootstrap/bootstrap-placeholder.zip}"
+      - export PLACEHOLDER_ECS_IMAGE="${PLACEHOLDER_ECS_IMAGE:-public.ecr.aws/docker/library/nginx:alpine}"
+      - |
+        if [ "${BOOTSTRAP_ALLOW_MISSING_ARTIFACTS}" = "true" ]; then
+          if ! aws s3api head-object --bucket "${LAMBDA_ARTIFACT_BUCKET}" --key "${LAMBDA_BOOTSTRAP_PLACEHOLDER_KEY}" >/dev/null 2>&1; then
+            echo "WARN: Bootstrap placeholder not found. Creating s3://${LAMBDA_ARTIFACT_BUCKET}/${LAMBDA_BOOTSTRAP_PLACEHOLDER_KEY}"
+            tmp_dir="/tmp/bootstrap-lambda-placeholder"
+            rm -rf "${tmp_dir}"
+            mkdir -p "${tmp_dir}"
+            echo "bootstrap placeholder" > "${tmp_dir}/bootstrap.txt"
+            (cd "${tmp_dir}" && zip -q "bootstrap-placeholder.zip" bootstrap.txt)
+            aws s3 cp "${tmp_dir}/bootstrap-placeholder.zip" "s3://${LAMBDA_ARTIFACT_BUCKET}/${LAMBDA_BOOTSTRAP_PLACEHOLDER_KEY}"
+          fi
+        fi
+      - export API_LAMBDA_S3_KEY="lambda-artifacts/resources-api/resources-api-${RELEASE_SHA_SHORT}.zip"
+      - export MIGRATE_LAMBDA_S3_KEY="lambda-artifacts/migrate/migrate-${RELEASE_SHA_SHORT}.zip"
+      - export CHANGE_LOGGER_LAMBDA_S3_KEY="lambda-artifacts/resources-change-logger/resources-change-logger-${RELEASE_SHA_SHORT}.zip"
+      - |
+        resolve_lambda_key() {
+          local current_key="$1"
+          local latest_key="$2"
+          local out_var="$3"
+
+          if aws s3api head-object --bucket "${LAMBDA_ARTIFACT_BUCKET}" --key "${current_key}" >/dev/null 2>&1; then
+            eval "export ${out_var}='${current_key}'"
+            return
+          fi
+
+          if [ "${REQUIRE_COMMIT_ARTIFACTS}" = "true" ]; then
+            echo "ERROR: Missing commit artifact s3://${LAMBDA_ARTIFACT_BUCKET}/${current_key}"
+            exit 1
+          fi
+
+          if aws s3api head-object --bucket "${LAMBDA_ARTIFACT_BUCKET}" --key "${latest_key}" >/dev/null 2>&1; then
+            echo "WARN: Missing commit artifact ${current_key}, falling back to latest"
+            eval "export ${out_var}='${latest_key}'"
+            return
+          fi
+
+          if [ "${BOOTSTRAP_ALLOW_MISSING_ARTIFACTS}" = "true" ]; then
+            if aws s3api head-object --bucket "${LAMBDA_ARTIFACT_BUCKET}" --key "${LAMBDA_BOOTSTRAP_PLACEHOLDER_KEY}" >/dev/null 2>&1; then
+              echo "WARN: Missing commit/latest artifact for ${out_var}, using bootstrap placeholder ${LAMBDA_BOOTSTRAP_PLACEHOLDER_KEY}"
+              eval "export ${out_var}='${LAMBDA_BOOTSTRAP_PLACEHOLDER_KEY}'"
+              return
+            fi
+            echo "ERROR: Placeholder artifact missing s3://${LAMBDA_ARTIFACT_BUCKET}/${LAMBDA_BOOTSTRAP_PLACEHOLDER_KEY}"
+            exit 1
+          fi
+
+          echo "ERROR: Missing commit and latest artifact for ${out_var}, and bootstrap fallback is disabled"
+          exit 1
+        }
+
+        resolve_lambda_key "${API_LAMBDA_S3_KEY}" "lambda-artifacts/resources-api/resources-api-latest.zip" "API_LAMBDA_S3_KEY"
+        resolve_lambda_key "${MIGRATE_LAMBDA_S3_KEY}" "lambda-artifacts/migrate/migrate-latest.zip" "MIGRATE_LAMBDA_S3_KEY"
+        resolve_lambda_key "${CHANGE_LOGGER_LAMBDA_S3_KEY}" "lambda-artifacts/resources-change-logger/resources-change-logger-latest.zip" "CHANGE_LOGGER_LAMBDA_S3_KEY"
+      - |
+        resolve_image_ref() {
+          local repo_name="$1"
+          local out_var="$2"
+          local sha_ref="${ACCOUNT_ID}.dkr.ecr.${EFFECTIVE_AWS_REGION}.amazonaws.com/${repo_name}:${RELEASE_SHA_SHORT}"
+          local latest_ref="${ACCOUNT_ID}.dkr.ecr.${EFFECTIVE_AWS_REGION}.amazonaws.com/${repo_name}:latest"
+
+          if aws ecr describe-images --repository-name "${repo_name}" --image-ids imageTag="${RELEASE_SHA_SHORT}" --region "${EFFECTIVE_AWS_REGION}" >/dev/null 2>&1; then
+            eval "export ${out_var}=\"${sha_ref}\""
+            return
+          fi
+
+          if [ "${REQUIRE_COMMIT_ARTIFACTS}" = "true" ]; then
+            echo "ERROR: Missing image tag ${repo_name}:${RELEASE_SHA_SHORT}"
+            exit 1
+          fi
+
+          if aws ecr describe-images --repository-name "${repo_name}" --image-ids imageTag="latest" --region "${EFFECTIVE_AWS_REGION}" >/dev/null 2>&1; then
+            echo "WARN: Missing image tag ${repo_name}:${RELEASE_SHA_SHORT}, falling back to latest"
+            eval "export ${out_var}=\"${latest_ref}\""
+            return
+          fi
+
+          if [ "${BOOTSTRAP_ALLOW_MISSING_ARTIFACTS}" = "true" ]; then
+            echo "WARN: Missing commit/latest image for ${repo_name}, using placeholder image ${PLACEHOLDER_ECS_IMAGE}"
+            eval "export ${out_var}=\"${PLACEHOLDER_ECS_IMAGE}\""
+            return
+          fi
+
+          echo "ERROR: Missing commit and latest image for ${repo_name}, and bootstrap fallback is disabled"
+          exit 1
+        }
+
+        resolve_image_ref "${YARDI_IMAGE_REPO_NAME}" "YARDI_IMAGE_REF"
+
+  build:
+    commands:
+      - cd iac
+      - echo "Running Terraform in ${ENVIRONMENT}"
+      - |
+        cat > runtime.auto.tfvars.json <<EOF
+        {
+          "api_lambda_s3_key": "${API_LAMBDA_S3_KEY}",
+          "migrate_lambda_s3_key": "${MIGRATE_LAMBDA_S3_KEY}",
+          "change_logger_lambda_s3_key": "${CHANGE_LOGGER_LAMBDA_S3_KEY}",
+          "ecs_container_image": "${YARDI_IMAGE_REF}"
+        }
+        EOF
+      - terraform init -reconfigure -backend-config="${ENVIRONMENT}-backend.tfvars"
+      - terraform validate
+      - terraform fmt -recursive
+      - terraform plan -var-file="${ENVIRONMENT}.tfvars" -var-file="runtime.auto.tfvars.json" -out="terraform-plan-${ENVIRONMENT}.tfplan"
+      - terraform "${TERRAFORM_INPUT}" -var-file="${ENVIRONMENT}.tfvars" -var-file="runtime.auto.tfvars.json" -auto-approve
+
+
+  post_build:
+    commands:
+      - echo "Uploading Terraform plan to S3"
+      - aws s3 cp terraform-plan-${ENVIRONMENT}.tfplan s3://${BUCKET_NAME}/${ENVIRONMENT}/terraform-plan.tfplan
+      - echo "Terraform plan uploaded to s3 successfully"

@@ -1,0 +1,5 @@
+/.dev.lock
+/.dev.integrated.lock
+/.dev-logs/
+/infra/stepca/data/
+/infra/nginx/certs/

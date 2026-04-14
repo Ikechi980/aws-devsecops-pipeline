@@ -1,0 +1,471 @@
+# yamllint disable rule:line-length
+---
+version: 0.2
+
+env:
+  variables:
+    MAX_CRITICAL: "0"
+    MAX_HIGH: "1"
+    STEPCA_MAX_CRITICAL: "2"
+    STEPCA_MAX_HIGH: "0"
+    ENFORCE_VULN_THRESHOLDS: "true"
+    FAIL_ON_MISSING_ARTIFACT: "true"
+    TRIVY_GIT_BASE_REF: ""
+    TRIVY_GIT_BASE_SHA: ""
+    QUARANTINE_BUCKET: "sentrics-ensure-terraform-state-codepipeline-cache"
+    QUARANTINE_PREFIX: "ensure-cloud-security-quarantine"
+
+phases:
+  install:
+    commands:
+      - yum install -y awscli jq unzip tar gzip docker
+      - curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin
+      - trivy --version
+      - aws --version
+
+  pre_build:
+    commands:
+      - export AWS_PAGER=""
+      - export ENVIRONMENT="${ENVIRONMENT:-dev}"
+      - export EFFECTIVE_AWS_REGION="${AWS_DEFAULT_REGION:-${AWS_REGION:-}}"
+      - 'if [ -z "${EFFECTIVE_AWS_REGION}" ]; then echo "ERROR: AWS_DEFAULT_REGION/AWS_REGION is empty."; exit 1; fi'
+      - export ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
+      - export RELEASE_SHA_FULL="${RELEASE_SHA:-${CODEBUILD_RESOLVED_SOURCE_VERSION:-}}"
+      - 'if [ -z "${RELEASE_SHA_FULL}" ]; then echo "ERROR: RELEASE_SHA/CODEBUILD_RESOLVED_SOURCE_VERSION is empty."; exit 1; fi'
+      - export RELEASE_SHA_SHORT="$(echo "${RELEASE_SHA_FULL}" | cut -c1-12)"
+      - export QUARANTINE_BASE="s3://${QUARANTINE_BUCKET}/${QUARANTINE_PREFIX}/${ENVIRONMENT}/${RELEASE_SHA_SHORT}"
+      - echo "Using quarantine base ${QUARANTINE_BASE}"
+      - aws ecr get-login-password --region "${EFFECTIVE_AWS_REGION}" | docker login --username AWS --password-stdin "${ACCOUNT_ID}.dkr.ecr.${EFFECTIVE_AWS_REGION}.amazonaws.com"
+
+  build:
+    commands:
+      - |
+        set +e
+
+        FAILED_DEPLOYABLES=""
+        SUMMARY_FILE="/tmp/security-scan-summary.tsv"
+        echo -e "TYPE\tDEPLOYABLE\tCRITICAL\tHIGH\tSTATUS\tNOTE" > "${SUMMARY_FILE}"
+
+        add_failure() {
+          local deployable="$1"
+          if [ -z "${FAILED_DEPLOYABLES}" ]; then
+            FAILED_DEPLOYABLES="${deployable}"
+          else
+            FAILED_DEPLOYABLES="${FAILED_DEPLOYABLES},${deployable}"
+          fi
+        }
+
+        add_summary() {
+          local type="$1"
+          local deployable="$2"
+          local critical="$3"
+          local high="$4"
+          local status="$5"
+          local note="$6"
+          echo -e "${type}\t${deployable}\t${critical}\t${high}\t${status}\t${note}" >> "${SUMMARY_FILE}"
+        }
+
+        SHOULD_SCAN_HEADEND_GATEWAY=true
+        SHOULD_SCAN_PKI_API=true
+        SHOULD_SCAN_STEPCA=true
+        SHOULD_SCAN_LAMBDA_BUNDLE=true
+
+        resolve_git_base() {
+          local ref="$1"
+          local sha="$2"
+          local normalized_ref="$1"
+          local candidate_ref
+
+          if [ -n "$sha" ]; then
+            if git rev-parse --verify "${sha}^{commit}" >/dev/null 2>&1; then
+              echo "$sha"
+              return 0
+            fi
+            return 1
+          fi
+
+          case "$normalized_ref" in
+            refs/heads/*)
+              normalized_ref="${normalized_ref#refs/heads/}"
+              ;;
+            refs/tags/*)
+              normalized_ref="${normalized_ref#refs/tags/}"
+              ;;
+          esac
+
+          if [ -z "$normalized_ref" ]; then
+            return 1
+          fi
+
+          candidate_ref="$normalized_ref"
+          if ! git rev-parse --verify "${candidate_ref}^{commit}" >/dev/null 2>&1; then
+            git fetch --depth=200 origin "$normalized_ref" >/dev/null 2>&1 || true
+            candidate_ref="origin/$normalized_ref"
+          fi
+
+          if git rev-parse --verify "${candidate_ref}^{commit}" >/dev/null 2>&1; then
+            echo "$candidate_ref"
+            return 0
+          fi
+
+          return 1
+        }
+
+        TRIVY_GIT_BASE_REF="${TRIVY_GIT_BASE_REF:-${CODEBUILD_WEBHOOK_BASE_REF:-}}"
+        if [ -n "${TRIVY_GIT_BASE_REF}" ] || [ -n "${TRIVY_GIT_BASE_SHA}" ]; then
+          echo "Git-base mode enabled for Trivy selection."
+          BASE_TARGET="$(resolve_git_base "${TRIVY_GIT_BASE_REF}" "${TRIVY_GIT_BASE_SHA}")"
+          if [ -z "$BASE_TARGET" ]; then
+            echo "WARN: Unable to resolve git base from TRIVY_GIT_BASE_REF/TRIVY_GIT_BASE_SHA; scanning all deployables."
+          else
+            HEAD_TARGET="$RELEASE_SHA_FULL"
+            if ! git rev-parse --verify "${HEAD_TARGET}^{commit}" >/dev/null 2>&1; then
+              HEAD_TARGET="HEAD"
+            fi
+
+            GIT_BASE_COMMIT="$(git merge-base "$BASE_TARGET" "$HEAD_TARGET" 2>/dev/null || true)"
+            if [ -z "$GIT_BASE_COMMIT" ]; then
+              echo "WARN: Unable to calculate merge-base against ${BASE_TARGET}; scanning all deployables."
+            else
+              CHANGED_FILES="$(git diff --name-only "$GIT_BASE_COMMIT" "$HEAD_TARGET" 2>/dev/null || true)"
+              SHOULD_SCAN_HEADEND_GATEWAY=false
+              SHOULD_SCAN_PKI_API=false
+              SHOULD_SCAN_STEPCA=false
+              SHOULD_SCAN_LAMBDA_BUNDLE=false
+
+              while IFS= read -r changed_path; do
+                if [ -z "$changed_path" ]; then
+                  continue
+                fi
+                case "$changed_path" in
+                  headend-gateway/*)
+                    SHOULD_SCAN_HEADEND_GATEWAY=true
+                    ;;
+                  headend-api/*)
+                    SHOULD_SCAN_LAMBDA_BUNDLE=true
+                    ;;
+                  pki/*)
+                    SHOULD_SCAN_PKI_API=true
+                    SHOULD_SCAN_STEPCA=true
+                    ;;
+                  *)
+                    SHOULD_SCAN_HEADEND_GATEWAY=true
+                    SHOULD_SCAN_PKI_API=true
+                    SHOULD_SCAN_STEPCA=true
+                    SHOULD_SCAN_LAMBDA_BUNDLE=true
+                    ;;
+                esac
+              done <<< "${CHANGED_FILES}"
+
+              echo "Using git base ${GIT_BASE_COMMIT}; deployable selection: headend-gateway=${SHOULD_SCAN_HEADEND_GATEWAY}, pki-api=${SHOULD_SCAN_PKI_API}, stepca=${SHOULD_SCAN_STEPCA}, lambda-bundle=${SHOULD_SCAN_LAMBDA_BUNDLE}"
+            fi
+          fi
+        fi
+
+        count_severity() {
+          local report_file="$1"
+          local sev="$2"
+          jq --arg sev "$sev" '[.. | objects | select(has("Severity")) | .Severity | select(. == $sev)] | length' "$report_file"
+        }
+
+        resolve_image_thresholds() {
+          local deployable="$1"
+          local max_critical="${MAX_CRITICAL}"
+          local max_high="${MAX_HIGH}"
+
+          case "$deployable" in
+            stepca)
+              max_critical="${STEPCA_MAX_CRITICAL:-${MAX_CRITICAL}}"
+              max_high="${STEPCA_MAX_HIGH:-${MAX_HIGH}}"
+              ;;
+          esac
+
+          echo "${max_critical} ${max_high}"
+        }
+
+        print_vuln_details() {
+          local report_file="$1"
+          local artifact_type="$2"
+          local deployable="$3"
+          local critical_count="$4"
+          local high_count="$5"
+
+          if [ "$critical_count" -eq 0 ] && [ "$high_count" -eq 0 ]; then
+            return
+          fi
+
+          echo "Vulnerability details for ${artifact_type}/${deployable} (CRITICAL+HIGH):"
+          jq -r '
+            [
+              .Results[]?
+              | .Vulnerabilities[]?
+              | select(.Severity == "CRITICAL" or .Severity == "HIGH")
+              | [
+                  .Severity,
+                  .VulnerabilityID,
+                  (.PkgName // "-"),
+                  (.InstalledVersion // "-"),
+                  (.FixedVersion // "-"),
+                  ((.Title // .Description // "-") | gsub("[\r\n\t]+"; " ") | .[0:140])
+                ]
+            ]
+            | sort_by(.[0], .[1])
+            | .[]
+            | @tsv
+          ' "$report_file" | while IFS=$'\t' read -r sev vuln_id pkg installed fixed title; do
+            printf '  - %s %s pkg=%s installed=%s fixed=%s title=%s\n' "$sev" "$vuln_id" "$pkg" "$installed" "$fixed" "$title"
+          done
+        }
+
+        process_image_artifact() {
+          local deployable="$1"
+          local artifact_dir="/tmp/quarantine-image-${deployable}"
+          local metadata_path
+          local tar_path
+          local repo_name
+          local tag
+          local local_image
+          local report_file
+          local critical_count
+          local high_count
+          local thresholds
+          local allowed_max_critical
+          local allowed_max_high
+          local ecr_ref
+          local quarantine_image_prefix="${QUARANTINE_BASE}/images/${deployable}"
+
+          rm -rf "$artifact_dir"
+          mkdir -p "$artifact_dir"
+          if ! aws s3 cp "${quarantine_image_prefix}/metadata.json" "${artifact_dir}/metadata.json" >/dev/null 2>&1; then
+            echo "ERROR: Missing quarantine metadata ${quarantine_image_prefix}/metadata.json"
+            add_summary "image" "$deployable" "-" "-" "ERROR" "missing metadata.json in quarantine"
+            if [ "${FAIL_ON_MISSING_ARTIFACT}" = "true" ]; then
+              add_failure "$deployable"
+            fi
+            return
+          fi
+          if ! aws s3 cp "${quarantine_image_prefix}/image.tar" "${artifact_dir}/image.tar" >/dev/null 2>&1; then
+            echo "ERROR: Missing quarantine image tar ${quarantine_image_prefix}/image.tar"
+            add_summary "image" "$deployable" "-" "-" "ERROR" "missing image.tar in quarantine"
+            if [ "${FAIL_ON_MISSING_ARTIFACT}" = "true" ]; then
+              add_failure "$deployable"
+            fi
+            return
+          fi
+
+          metadata_path="$(find "$artifact_dir" -type f -name metadata.json | head -n1)"
+          tar_path="$(find "$artifact_dir" -type f -name image.tar | head -n1)"
+
+          if [ -z "$metadata_path" ] || [ -z "$tar_path" ]; then
+            echo "ERROR: Missing image artifact files in $artifact_dir"
+            add_summary "image" "$deployable" "-" "-" "ERROR" "image artifact files not found locally"
+            if [ "${FAIL_ON_MISSING_ARTIFACT}" = "true" ]; then
+              add_failure "$deployable"
+            fi
+            return
+          fi
+
+          deployable="$(jq -r '.deployable' "$metadata_path")"
+          repo_name="$(jq -r '.image_repo_name' "$metadata_path")"
+          tag="$(jq -r '.image_tag' "$metadata_path")"
+          local_image="$(jq -r '.local_image' "$metadata_path")"
+
+          echo "=== Scanning image deployable ${deployable} (${repo_name}:${tag}) ==="
+
+          report_file="/tmp/trivy-image-${deployable}.json"
+          if ! trivy image --quiet --no-progress --scanners vuln --format json --output "$report_file" --input "$tar_path"; then
+            echo "ERROR: Trivy image scan failed for ${deployable}"
+            add_summary "image" "$deployable" "-" "-" "ERROR" "trivy image scan failed"
+            add_failure "$deployable"
+            return
+          fi
+
+          critical_count="$(count_severity "$report_file" "CRITICAL")"
+          high_count="$(count_severity "$report_file" "HIGH")"
+          thresholds="$(resolve_image_thresholds "$deployable")"
+          allowed_max_critical="${thresholds%% *}"
+          allowed_max_high="${thresholds##* }"
+          echo "${deployable}: CRITICAL=${critical_count}, HIGH=${high_count}"
+          print_vuln_details "$report_file" "image" "$deployable" "$critical_count" "$high_count"
+
+          if [ "${ENFORCE_VULN_THRESHOLDS}" = "true" ] && { [ "$critical_count" -gt "${allowed_max_critical}" ] || [ "$high_count" -gt "${allowed_max_high}" ]; }; then
+            echo "ERROR: ${deployable} exceeded vulnerability threshold"
+            add_summary "image" "$deployable" "$critical_count" "$high_count" "BLOCKED" "threshold exceeded (max C=${allowed_max_critical}, H=${allowed_max_high})"
+            add_failure "$deployable"
+            return
+          fi
+
+          if ! docker load -i "$tar_path" >/tmp/docker-load-${deployable}.log 2>&1; then
+            echo "ERROR: docker load failed for ${deployable}"
+            add_summary "image" "$deployable" "$critical_count" "$high_count" "ERROR" "docker load failed"
+            add_failure "$deployable"
+            return
+          fi
+          ecr_ref="${ACCOUNT_ID}.dkr.ecr.${EFFECTIVE_AWS_REGION}.amazonaws.com/${repo_name}:${tag}"
+          if ! docker tag "$local_image" "$ecr_ref"; then
+            echo "ERROR: docker tag failed for ${deployable}"
+            add_summary "image" "$deployable" "$critical_count" "$high_count" "ERROR" "docker tag failed"
+            add_failure "$deployable"
+            return
+          fi
+          if ! docker push "$ecr_ref"; then
+            echo "ERROR: docker push failed for ${deployable}"
+            add_summary "image" "$deployable" "$critical_count" "$high_count" "ERROR" "docker push failed"
+            add_failure "$deployable"
+            return
+          fi
+          add_summary "image" "$deployable" "$critical_count" "$high_count" "PUBLISHED" "published to ECR"
+          echo "Pushed ${ecr_ref}"
+        }
+
+        process_lambda_bundle() {
+          local artifact_dir="/tmp/quarantine-lambda-bundle"
+          local manifest_path
+          local quarantine_lambda_prefix="${QUARANTINE_BASE}/lambda"
+
+          rm -rf "$artifact_dir"
+          mkdir -p "$artifact_dir"
+          if ! aws s3 cp "${quarantine_lambda_prefix}/lambda-manifest.json" "${artifact_dir}/lambda-manifest.json" >/dev/null 2>&1; then
+            echo "ERROR: Missing quarantine lambda manifest ${quarantine_lambda_prefix}/lambda-manifest.json"
+            add_summary "lambda" "bundle" "-" "-" "ERROR" "missing lambda-manifest.json in quarantine"
+            if [ "${FAIL_ON_MISSING_ARTIFACT}" = "true" ]; then
+              add_failure "lambda-bundle"
+            fi
+            return
+          fi
+
+          manifest_path="$(find "$artifact_dir" -type f -name lambda-manifest.json | head -n1)"
+          if [ -z "$manifest_path" ]; then
+            echo "ERROR: Missing lambda-manifest.json in $artifact_dir"
+            add_summary "lambda" "bundle" "-" "-" "ERROR" "lambda-manifest.json not found locally"
+            if [ "${FAIL_ON_MISSING_ARTIFACT}" = "true" ]; then
+              add_failure "lambda-bundle"
+            fi
+            return
+          fi
+
+          if ! jq -e '.artifacts and (.artifacts | type == "array")' "$manifest_path" >/dev/null 2>&1; then
+            echo "ERROR: Invalid lambda manifest format in ${manifest_path}"
+            add_summary "lambda" "bundle" "-" "-" "ERROR" "invalid lambda-manifest.json format"
+            add_failure "lambda-bundle"
+            return
+          fi
+
+          while IFS= read -r item; do
+            local deployable
+            local file_name
+            local bucket
+            local key
+            local zip_path
+            local extract_dir
+            local report_file
+            local critical_count
+            local high_count
+
+            deployable="$(echo "$item" | jq -r '.deployable')"
+            file_name="$(echo "$item" | jq -r '.file')"
+            bucket="$(echo "$item" | jq -r '.s3_bucket')"
+            key="$(echo "$item" | jq -r '.s3_key')"
+            if ! aws s3 cp "${quarantine_lambda_prefix}/${file_name}" "${artifact_dir}/${file_name}" >/dev/null 2>&1; then
+              echo "ERROR: Missing quarantine zip ${quarantine_lambda_prefix}/${file_name} for ${deployable}"
+              add_summary "lambda" "$deployable" "-" "-" "ERROR" "missing zip in quarantine"
+              add_failure "$deployable"
+              continue
+            fi
+            zip_path="${artifact_dir}/${file_name}"
+
+            if [ ! -f "$zip_path" ]; then
+              echo "ERROR: Missing zip file ${file_name} for ${deployable}"
+              add_summary "lambda" "$deployable" "-" "-" "ERROR" "zip path missing locally"
+              add_failure "$deployable"
+              continue
+            fi
+
+            echo "=== Scanning lambda deployable ${deployable} (${file_name}) ==="
+
+            extract_dir="/tmp/unzip-${deployable}"
+            rm -rf "$extract_dir"
+            mkdir -p "$extract_dir"
+            if ! unzip -q "$zip_path" -d "$extract_dir"; then
+              echo "ERROR: unzip failed for ${deployable}"
+              add_summary "lambda" "$deployable" "-" "-" "ERROR" "unzip failed"
+              add_failure "$deployable"
+              continue
+            fi
+
+            report_file="/tmp/trivy-lambda-${deployable}.json"
+            if ! trivy fs --quiet --no-progress --scanners vuln --format json --output "$report_file" "$extract_dir"; then
+              echo "ERROR: Trivy fs scan failed for ${deployable}"
+              add_summary "lambda" "$deployable" "-" "-" "ERROR" "trivy fs scan failed"
+              add_failure "$deployable"
+              continue
+            fi
+
+            critical_count="$(count_severity "$report_file" "CRITICAL")"
+            high_count="$(count_severity "$report_file" "HIGH")"
+            echo "${deployable}: CRITICAL=${critical_count}, HIGH=${high_count}"
+            print_vuln_details "$report_file" "lambda" "$deployable" "$critical_count" "$high_count"
+
+            if [ "${ENFORCE_VULN_THRESHOLDS}" = "true" ] && { [ "$critical_count" -gt "${MAX_CRITICAL}" ] || [ "$high_count" -gt "${MAX_HIGH}" ]; }; then
+              echo "ERROR: ${deployable} exceeded vulnerability threshold"
+              add_summary "lambda" "$deployable" "$critical_count" "$high_count" "BLOCKED" "threshold exceeded"
+              add_failure "$deployable"
+              continue
+            fi
+
+            if ! aws s3 cp "$zip_path" "s3://${bucket}/${key}"; then
+              echo "ERROR: Upload failed for ${deployable} to s3://${bucket}/${key}"
+              add_summary "lambda" "$deployable" "$critical_count" "$high_count" "ERROR" "publish to s3 failed"
+              add_failure "$deployable"
+              continue
+            fi
+            echo "Uploaded s3://${bucket}/${key}"
+            add_summary "lambda" "$deployable" "$critical_count" "$high_count" "PUBLISHED" "published to s3"
+          done < <(jq -c '.artifacts[]' "$manifest_path")
+        }
+
+        if [ "${SHOULD_SCAN_HEADEND_GATEWAY}" = "true" ]; then
+          process_image_artifact "headend-gateway"
+        else
+          echo "Skipping headend-gateway scan because no changes were detected from git base."
+          add_summary "image" "headend-gateway" "-" "-" "SKIPPED" "no changes from git base"
+        fi
+
+        if [ "${SHOULD_SCAN_PKI_API}" = "true" ]; then
+          process_image_artifact "pki-api"
+        else
+          echo "Skipping pki-api scan because no changes were detected from git base."
+          add_summary "image" "pki-api" "-" "-" "SKIPPED" "no changes from git base"
+        fi
+
+        if [ "${SHOULD_SCAN_STEPCA}" = "true" ]; then
+          process_image_artifact "stepca"
+        else
+          echo "Skipping stepca scan because no changes were detected from git base."
+          add_summary "image" "stepca" "-" "-" "SKIPPED" "no changes from git base"
+        fi
+
+        if [ "${SHOULD_SCAN_LAMBDA_BUNDLE}" = "true" ]; then
+          process_lambda_bundle
+        else
+          echo "Skipping lambda bundle scan because no changes were detected from git base."
+          add_summary "lambda" "bundle" "-" "-" "SKIPPED" "no changes from git base"
+        fi
+
+        echo "=== Security Scan Findings Summary ==="
+        if command -v column >/dev/null 2>&1; then
+          column -t -s $'\t' "${SUMMARY_FILE}"
+        else
+          cat "${SUMMARY_FILE}"
+        fi
+
+        if [ -n "$FAILED_DEPLOYABLES" ]; then
+          echo "FAILED_DEPLOYABLES=${FAILED_DEPLOYABLES}"
+          exit 1
+        fi
+
+        echo "All deployables passed security scan and were published."
+
+  post_build:
+    commands:
+      - echo "Security scan stage completed."

@@ -1,0 +1,44 @@
+[package]
+name = "resources-api"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.93"
+
+[[bin]]
+name = "resources-api"
+path = "src/main.rs"
+
+[[bin]]
+name = "migrate"
+path = "src/bin/migrate.rs"
+
+[dependencies]
+axum = "0.8"
+aws-sdk-sns = "1"
+aws-config = { version = "1", features = ["behavior-version-latest"] }
+chrono = { version = "0.4", features = ["serde"] }
+dotenvy = "0.15"
+lambda_http = "1"
+lambda_runtime = "1"
+log = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sqlx = { version = "0.8", features = [
+    "runtime-tokio-rustls",
+    "postgres",
+    "macros",
+    "uuid",
+    "chrono",
+    "migrate",
+] }
+sha2 = "0.11"
+tokio = { version = "1", features = ["macros", "rt"] }
+tower-http = { version = "0.6.8", features = ["cors", "limit", "trace"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }
+url = "2"
+uuid = { version = "1", features = ["serde", "v4"] }
+
+[dev-dependencies]
+reqwest = { version = "0.13", features = ["json"] }
+tokio = { version = "1", features = ["full"] }

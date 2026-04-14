@@ -1,0 +1,48 @@
+[
+  {
+    "name": "pki-api",
+    "image": "${ecs_container_image}",
+    "essential": true,
+    "stopTimeout": 60,
+
+    "mountPoints": [
+      {
+        "sourceVolume": "stepca-efs",
+        "containerPath": "/etc/step-ca",
+        "readOnly": true
+      }
+    ],
+
+    "portMappings": [
+      {
+        "containerPort": 80,
+        "protocol": "tcp"
+      }
+    ],
+
+    "secrets": [
+      { "name": "SYSTEM_API_BASE", "valueFrom": "/ensure-cloud/pki-api/SYSTEM_API_BASE" },
+      { "name": "STEP_CA_URL", "valueFrom": "/ensure-cloud/pki-api/STEP_CA_URL" },
+      { "name": "STEP_CA_HOST", "valueFrom": "/ensure-cloud/pki-api/STEP_CA_HOST" },
+      { "name": "STEP_CA_PORT", "valueFrom": "/ensure-cloud/pki-api/STEP_CA_PORT" },
+      { "name": "STEP_CA_CERTS_DIR", "valueFrom": "/ensure-cloud/pki-api/STEP_CA_CERTS_DIR" },
+      { "name": "STEP_CA_PROVISIONER_NAME", "valueFrom": "/ensure-cloud/pki-api/STEP_CA_PROVISIONER_NAME" },
+      { "name": "STEP_CA_PROVISIONER_KEY_ID", "valueFrom": "/ensure-cloud/pki-api/STEP_CA_PROVISIONER_KEY_ID" },
+      { "name": "STEP_CA_PROVISIONER_KEY_PATH", "valueFrom": "/ensure-cloud/pki-api/STEP_CA_PROVISIONER_KEY_PATH" },
+      { "name": "STEP_CA_TOKEN_TTL_SECS", "valueFrom": "/ensure-cloud/pki-api/STEP_CA_TOKEN_TTL_SECS" },
+      { "name": "HOST", "valueFrom": "/ensure-cloud/pki-api/HOST" },
+      { "name": "PORT", "valueFrom": "/ensure-cloud/pki-api/PORT" },
+      { "name": "ALLOWED_CIDRS", "valueFrom": "/ensure-cloud/pki-api/ALLOWED_CIDRS" },
+      { "name": "RUST_LOG", "valueFrom": "/ensure-cloud/pki-api/RUST_LOG" }
+    ],
+
+    "logConfiguration": {
+      "logDriver": "awslogs",
+      "options": {
+        "awslogs-group": "${ecs_log_group}",
+        "awslogs-region": "us-east-1",
+        "awslogs-stream-prefix": "ecs"
+      }
+    }
+  }
+]

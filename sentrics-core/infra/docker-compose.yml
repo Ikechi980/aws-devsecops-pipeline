@@ -1,0 +1,52 @@
+services:
+  postgres:
+    image: postgres:14.22-alpine3.23
+    container_name: sentrics-postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: resources_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  localstack:
+    image: localstack/localstack:4.12.0
+    container_name: sentrics-localstack
+    ports:
+      - "4566:4566"
+    environment:
+      - SERVICES=sns,sqs,dynamodb
+      - DEBUG=0
+    volumes:
+      - ./localstack:/etc/localstack/init/ready.d
+      - localstack_data:/var/lib/localstack
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4566/_localstack/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  mock-yardi-api:
+    build: ./mock-yardi-api
+    container_name: sentrics-mock-yardi-api
+    ports:
+      - "3001:3000"
+    environment:
+      - PORT=3000
+      - SERVICE_NAME=mock-yardi-api
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:3000/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  postgres_data:
+  localstack_data:

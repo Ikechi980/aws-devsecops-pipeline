@@ -1,0 +1,50 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO locations (id, community_id, name, location_type, yardi_reference_id) \n           VALUES ($1, $2, $3, $4, $5) \n           RETURNING \n               id, \n               community_id, \n               name, \n               location_type as \"location_type: LocationType\", \n               yardi_reference_id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "community_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "location_type: LocationType",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "yardi_reference_id",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "6789c14a20cfad5c9a2cf494be2eed4841b2ab03fac6b38ac08b1de7ea4f8437"
+}

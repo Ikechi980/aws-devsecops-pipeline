@@ -1,0 +1,40 @@
+[package]
+name = "yardi-sync"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.93"
+
+[[bin]]
+name = "yardi-sync"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+aws-config = { version = "1", features = ["behavior-version-latest"] }
+aws-credential-types = "1"
+aws-sdk-sns = "1"
+aws-sdk-sqs = "1"
+aws-sigv4 = "1"
+base64 = "0.22"
+chrono = { version = "0.4", features = ["serde"] }
+dashmap = "6"
+dotenvy = "0.15"
+reqwest = { version = "0.13", features = ["json", "form", "query"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.11"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "time"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1", features = ["serde", "v4"] }
+
+[dev-dependencies]
+anyhow = "1"
+aws-types = "1"
+chrono = { version = "0.4", features = ["serde"] }
+dotenvy = "0.15"
+reqwest = { version = "0.13", features = ["json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+uuid = { version = "1", features = ["serde", "v4"] }

@@ -1,0 +1,46 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT \n            c.id as \"community_id!\",\n            l.id as \"location_id?\", \n            l.name as \"name?\",\n            l.location_type as \"location_type?: LocationType\",\n            l.yardi_reference_id as \"yardi_reference_id?\"\n           FROM communities c\n           LEFT JOIN locations l ON l.community_id = c.id\n           WHERE c.id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "community_id!",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "location_id?",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "name?",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "location_type?: LocationType",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "yardi_reference_id?",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "14ad9147ea766f5ed6bf9e0c47057fee169a1c3c986f5eb519fa061b091e7864"
+}

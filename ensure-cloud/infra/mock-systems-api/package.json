@@ -1,0 +1,14 @@
+{
+  "name": "mock-systems-api",
+  "version": "1.0.0",
+  "description": "Mock Systems API for dev/test",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "express": "^5.1.0"
+  }
+}

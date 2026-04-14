@@ -1,0 +1,42 @@
+# Terraform
+**/.terraform/*
+*.tfstate
+*.tfstate.*
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# Terraform variable files (often contain secrets/environment values)
+*.tfvars
+*.tfvars.json
+!*.tfvars.example
+!*.auto.tfvars.example
+!iac/dev.tfvars
+!iac/dev-backend.tfvars
+!iac/prod.tfvars
+!iac/prod-backend.tfvars
+
+# Terraform plan files
+*.tfplan
+*.plan
+
+# Local CLI config / credentials
+.terraformrc
+terraform.rc
+
+# Sensitive env/config files
+.env
+.env.*
+*.pem
+*.key
+
+# OS / editor artifacts
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
