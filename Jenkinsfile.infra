@@ -1,0 +1,286 @@
+// =============================================================================
+// Sentrics Event-Driven Platform — Infrastructure Pipeline
+//
+// Runs Terraform for one or both roots in this repo.
+//
+//   Roots
+//     ensure-cloud  → Infra-Ensure-cloud/iac/
+//     sentrics-core → infra-sentrics-core/iac/
+//
+//   Ordering — ensure-cloud reads sentrics-core remote state, so when
+//   STACK=both the stages always run sentrics-core first, then ensure-cloud.
+//
+//   1. Validate parameters
+//   2. Plan: sentrics-core   (when STACK=both|sentrics-core)
+//   3. Plan: ensure-cloud    (when STACK=both|ensure-cloud)
+//   4. [MANUAL GATE]         Human reviews plan(s) before apply
+//   5. Apply: sentrics-core  (when STACK=both|sentrics-core)
+//   6. Apply: ensure-cloud   (when STACK=both|ensure-cloud)
+//
+// Usage
+//   Plan only  : ACTION=plan,  ENVIRONMENT=dev|prod, STACK=ensure-cloud|sentrics-core|both
+//   Plan+Apply : ACTION=apply, ENVIRONMENT=dev|prod, STACK=ensure-cloud|sentrics-core|both
+// =============================================================================
+
+pipeline {
+    agent any
+
+    options {
+        buildDiscarder(logRotator(numToKeepStr: '20'))
+        timeout(time: 60, unit: 'MINUTES')
+        disableConcurrentBuilds()
+    }
+
+    parameters {
+        choice(
+            name: 'STACK',
+            choices: ['both', 'ensure-cloud', 'sentrics-core'],
+            description: 'Which Terraform root to target'
+        )
+        choice(
+            name: 'ENVIRONMENT',
+            choices: ['dev', 'prod'],
+            description: 'Target environment — selects {env}.tfvars and {env}-backend.tfvars'
+        )
+        choice(
+            name: 'ACTION',
+            choices: ['plan', 'apply'],
+            description: 'plan = show what would change | apply = plan + manual gate + apply'
+        )
+        string(
+            name: 'RELEASE_SHA',
+            defaultValue: '',
+            description: 'Git commit SHA — replaces <RELEASE_SHA> in tfvars (Lambda S3 keys + ECS image tags). Required for apply; optional for a structural plan.'
+        )
+        string(
+            name: 'TF_LOG',
+            defaultValue: '',
+            description: 'Optional Terraform log level (TRACE|DEBUG|INFO|WARN|ERROR). Leave blank for none.'
+        )
+    }
+
+    environment {
+        AWS_REGION       = 'us-east-1'
+        TF_IN_AUTOMATION = 'true'
+        TF_INPUT         = 'false'
+
+        // Root directories for each stack
+        EC_TF_DIR = 'Infra-Ensure-cloud/iac'
+        SC_TF_DIR = 'infra-sentrics-core/iac'
+    }
+
+    stages {
+
+        // =====================================================================
+        // STAGE 1 — Validate parameters
+        // =====================================================================
+        stage('Validate') {
+            steps {
+                script {
+                    if (!['dev', 'prod'].contains(params.ENVIRONMENT)) {
+                        error("ENVIRONMENT must be 'dev' or 'prod'")
+                    }
+                    if (!['plan', 'apply'].contains(params.ACTION)) {
+                        error("ACTION must be 'plan' or 'apply'")
+                    }
+                    if (!['both', 'ensure-cloud', 'sentrics-core'].contains(params.STACK)) {
+                        error("STACK must be 'both', 'ensure-cloud', or 'sentrics-core'")
+                    }
+                    if (params.ACTION == 'apply' && !params.RELEASE_SHA?.trim()) {
+                        error("RELEASE_SHA is required when ACTION=apply")
+                    }
+                }
+                echo "Stack       : ${params.STACK}"
+                echo "Environment : ${params.ENVIRONMENT}"
+                echo "Action      : ${params.ACTION}"
+                echo "Release SHA : ${params.RELEASE_SHA ?: '(none — structural plan only)'}"
+            }
+        }
+
+        // =====================================================================
+        // STAGE 2 — Plan: sentrics-core first
+        // ensure-cloud reads sentrics-core remote state, so this always runs
+        // before the ensure-cloud plan stage.
+        // =====================================================================
+        stage('Plan: sentrics-core') {
+            when {
+                expression { return params.STACK in ['both', 'sentrics-core'] }
+            }
+            steps {
+                script { tfPlan(env.SC_TF_DIR, 'sentrics-core') }
+            }
+        }
+
+        // =====================================================================
+        // STAGE 3 — Plan: ensure-cloud (after sentrics-core state is current)
+        // =====================================================================
+        stage('Plan: ensure-cloud') {
+            when {
+                expression { return params.STACK in ['both', 'ensure-cloud'] }
+            }
+            steps {
+                script { tfPlan(env.EC_TF_DIR, 'ensure-cloud') }
+            }
+        }
+
+        // =====================================================================
+        // STAGE 3 — Manual approval gate (apply only)
+        // Shows artifact links for every plan that was produced.
+        // =====================================================================
+        stage('Approve Apply') {
+            when {
+                expression { return params.ACTION == 'apply' }
+            }
+            steps {
+                script {
+                    def links = []
+                    if (params.STACK in ['both', 'ensure-cloud']) {
+                        links << "${env.BUILD_URL}artifact/${env.EC_TF_DIR}/plan.txt  (ensure-cloud)"
+                    }
+                    if (params.STACK in ['both', 'sentrics-core']) {
+                        links << "${env.BUILD_URL}artifact/${env.SC_TF_DIR}/plan.txt  (sentrics-core)"
+                    }
+                    input(
+                        message: """\
+Apply Terraform changes?
+
+  Stack       : ${params.STACK}
+  Environment : ${params.ENVIRONMENT}
+
+Review plans before approving:
+${links.join('\n')}
+""",
+                        ok: 'Yes, apply',
+                        submitterParameter: 'APPROVER',
+                        timeout: 30,
+                        unit: 'MINUTES'
+                    )
+                    echo "Approved by: ${env.APPROVER ?: 'unknown'}"
+                }
+            }
+        }
+
+        // =====================================================================
+        // STAGE 5 — Apply: sentrics-core first
+        // =====================================================================
+        stage('Apply: sentrics-core') {
+            when {
+                allOf {
+                    expression { return params.ACTION == 'apply' }
+                    expression { return params.STACK in ['both', 'sentrics-core'] }
+                }
+            }
+            steps {
+                script { tfApply(env.SC_TF_DIR, 'sentrics-core') }
+            }
+        }
+
+        // =====================================================================
+        // STAGE 6 — Apply: ensure-cloud (sentrics-core state now updated)
+        // =====================================================================
+        stage('Apply: ensure-cloud') {
+            when {
+                allOf {
+                    expression { return params.ACTION == 'apply' }
+                    expression { return params.STACK in ['both', 'ensure-cloud'] }
+                }
+            }
+            steps {
+                script { tfApply(env.EC_TF_DIR, 'ensure-cloud') }
+            }
+        }
+    }
+
+    post {
+        success {
+            script {
+                if (params.ACTION == 'apply') {
+                    echo "Infra apply PASSED — ${params.STACK}/${params.ENVIRONMENT} is up to date."
+                } else {
+                    echo "Infra plan PASSED — review plan artifacts, then re-run with ACTION=apply."
+                }
+            }
+        }
+        failure {
+            echo "Infra pipeline FAILED — check stage logs above."
+        }
+        always {
+            sh '''
+                rm -f "${EC_TF_DIR}/plan.tfplan" || true
+                rm -f "${SC_TF_DIR}/plan.tfplan" || true
+            '''
+            cleanWs()
+        }
+    }
+}
+
+// =============================================================================
+// Shared helpers — called from both parallel branches
+// =============================================================================
+
+def tfPlan(String tfDir, String stackName) {
+    dir(tfDir) {
+        sh """
+            export TF_LOG="${params.TF_LOG}"
+
+            # ------------------------------------------------------------------
+            # Substitute <RELEASE_SHA> placeholder in a working copy of the
+            # tfvars file so the original template is never modified.
+            # ------------------------------------------------------------------
+            VARS_SRC="${params.ENVIRONMENT}.tfvars"
+            VARS_WORK="${params.ENVIRONMENT}.tfvars.work"
+            cp "\${VARS_SRC}" "\${VARS_WORK}"
+
+            SHA="${params.RELEASE_SHA?.trim() ?: 'UNKNOWN'}"
+            sed -i "s|<RELEASE_SHA>|\${SHA}|g" "\${VARS_WORK}"
+
+            echo "=== [${stackName}] terraform init ==="
+            terraform init \\
+                -backend-config="${params.ENVIRONMENT}-backend.tfvars" \\
+                -reconfigure \\
+                -input=false
+
+            echo "=== [${stackName}] terraform fmt -check ==="
+            terraform fmt -check -recursive
+
+            echo "=== [${stackName}] terraform validate ==="
+            terraform validate
+
+            echo "=== [${stackName}] terraform plan ==="
+            terraform plan \\
+                -var-file="\${VARS_WORK}" \\
+                -out=plan.tfplan \\
+                -input=false \\
+                -detailed-exitcode || PLAN_EXIT=\$?
+
+            rm -f "\${VARS_WORK}"
+
+            if [ "\${PLAN_EXIT:-0}" -eq 1 ]; then
+                echo "ERROR: terraform plan failed for ${stackName}"
+                exit 1
+            fi
+
+            terraform show -no-color plan.tfplan > plan.txt
+            echo "=== Plan summary (${stackName}) ==="
+            tail -20 plan.txt
+        """
+    }
+    archiveArtifacts artifacts: "${tfDir}/plan.txt",    allowEmptyArchive: false
+    archiveArtifacts artifacts: "${tfDir}/plan.tfplan", allowEmptyArchive: false
+}
+
+def tfApply(String tfDir, String stackName) {
+    dir(tfDir) {
+        sh """
+            export TF_LOG="${params.TF_LOG}"
+
+            echo "=== [\${stackName}] terraform apply ==="
+            terraform apply \\
+                -input=false \\
+                -auto-approve \\
+                plan.tfplan
+
+            echo "=== Apply complete (${stackName}) ==="
+        """
+    }
+}

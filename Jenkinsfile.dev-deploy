@@ -1,0 +1,332 @@
+// =============================================================================
+// Sentrics Event-Driven Platform — Dev Deployment Pipeline
+//
+// Triggered automatically by the build pipeline after a successful build.
+// Downloads the manifest from S3 and deploys all services to dev.
+//
+//   1. Validate parameters
+//   2. Download manifest from S3
+//   3. Deploy Lambdas (parallel)
+//      ├─ ensure-cloud : headend-api | core-change-publisher
+//      └─ sentrics-core: resources-api | migrate | resources-change-logger
+//   4. Deploy ECS services (parallel)
+//      ├─ ensure-cloud : headend-gateway | pki-api | stepca
+//      └─ sentrics-core: yardi-sync
+//   5. Wait for ECS stability
+// =============================================================================
+
+pipeline {
+    agent any
+
+    options {
+        buildDiscarder(logRotator(numToKeepStr: '30'))
+        timeout(time: 30, unit: 'MINUTES')
+        disableConcurrentBuilds()
+    }
+
+    parameters {
+        string(
+            name: 'RELEASE_SHA',
+            defaultValue: '',
+            description: 'Git commit SHA to deploy — passed automatically from the build pipeline'
+        )
+    }
+
+    environment {
+        AWS_REGION      = 'us-east-1'
+        ECR_REGISTRY    = '892234674906.dkr.ecr.us-east-1.amazonaws.com'
+        ARTIFACT_BUCKET = 'sentrics-ensure-lambda-artifacts-truststore'
+
+        // ensure-cloud
+        EC_CLUSTER = 'ensure-cloud-dev'
+
+        // sentrics-core
+        SC_CLUSTER = 'sentrics-core-cluster'
+    }
+
+    stages {
+
+        // =====================================================================
+        // STAGE 1 — Validate
+        // =====================================================================
+        stage('Validate') {
+            steps {
+                script {
+                    if (!params.RELEASE_SHA?.trim()) {
+                        error('RELEASE_SHA is required — this pipeline must be triggered by the build pipeline')
+                    }
+                }
+                echo "Deploying SHA: ${params.RELEASE_SHA} → dev"
+            }
+        }
+
+        // =====================================================================
+        // STAGE 2 — Download manifest
+        // =====================================================================
+        stage('Download Manifest') {
+            steps {
+                sh '''
+                    aws s3 cp \
+                        "s3://${ARTIFACT_BUCKET}/builds/${RELEASE_SHA}/manifest.json" \
+                        manifest.json \
+                        --region "${AWS_REGION}"
+
+                    echo "=== Manifest for ${RELEASE_SHA} ==="
+                    cat manifest.json
+                '''
+            }
+        }
+
+        // =====================================================================
+        // STAGE 3 — Lambda deployments (parallel)
+        // =====================================================================
+        stage('Deploy Lambdas') {
+            parallel {
+
+                stage('ensure-cloud Lambdas') {
+                    steps {
+                        sh '''
+                            SHA="${RELEASE_SHA}"
+
+                            echo "Updating headend-api..."
+                            aws lambda update-function-code \
+                                --function-name "ensure-cloud-dev-headend-api" \
+                                --s3-bucket    "${ARTIFACT_BUCKET}" \
+                                --s3-key       "lambda-artifacts/headend-api/headend-api-${SHA}.zip" \
+                                --region       "${AWS_REGION}"
+
+                            echo "Updating core-change-publisher..."
+                            aws lambda update-function-code \
+                                --function-name "ensure-cloud-dev-core-change-publisher" \
+                                --s3-bucket    "${ARTIFACT_BUCKET}" \
+                                --s3-key       "lambda-artifacts/core-change-publisher/core-change-publisher-${SHA}.zip" \
+                                --region       "${AWS_REGION}"
+
+                            echo "=== ensure-cloud Lambdas deployed ==="
+                        '''
+                    }
+                }
+
+                stage('sentrics-core Lambdas') {
+                    steps {
+                        sh '''
+                            SHA="${RELEASE_SHA}"
+
+                            echo "Updating resources-api..."
+                            aws lambda update-function-code \
+                                --function-name "sentrics-core-resources-api-dev" \
+                                --s3-bucket    "${ARTIFACT_BUCKET}" \
+                                --s3-key       "lambda-artifacts/resources-api/resources-api-${SHA}.zip" \
+                                --region       "${AWS_REGION}"
+
+                            echo "Updating migrate..."
+                            aws lambda update-function-code \
+                                --function-name "sentrics-core-db-migration-dev" \
+                                --s3-bucket    "${ARTIFACT_BUCKET}" \
+                                --s3-key       "lambda-artifacts/migrate/migrate-${SHA}.zip" \
+                                --region       "${AWS_REGION}"
+
+                            echo "Updating resources-change-logger..."
+                            aws lambda update-function-code \
+                                --function-name "sentrics-core-resources-change-logger-dev" \
+                                --s3-bucket    "${ARTIFACT_BUCKET}" \
+                                --s3-key       "lambda-artifacts/resources-change-logger/resources-change-logger-${SHA}.zip" \
+                                --region       "${AWS_REGION}"
+
+                            echo "=== sentrics-core Lambdas deployed ==="
+                        '''
+                    }
+                }
+            }
+        }
+
+        // =====================================================================
+        // STAGE 4 — ECS deployments (parallel)
+        // Strategy: describe current task def → swap image → register new
+        //           revision → update service with force-new-deployment
+        // =====================================================================
+        stage('Deploy ECS Services') {
+            parallel {
+
+                stage('headend-gateway') {
+                    steps {
+                        sh '''
+                            SHA="${RELEASE_SHA}"
+                            FAMILY="ensure-cloud-dev-headend-gateway-task"
+                            SERVICE="ensure-cloud-dev-headend-gateway-service"
+                            IMAGE="${ECR_REGISTRY}/ensure-cloud-headend-gateway:${SHA}"
+
+                            NEW_TASK_DEF=$(aws ecs describe-task-definition \
+                                --task-definition "${FAMILY}" \
+                                --query 'taskDefinition' \
+                                --output json \
+                                --region "${AWS_REGION}" \
+                                | jq --arg IMAGE "${IMAGE}" \
+                                    '.containerDefinitions[0].image = $IMAGE' \
+                                | jq 'del(.taskDefinitionArn,.revision,.status,.requiresAttributes,.compatibilities,.registeredAt,.registeredBy)')
+
+                            NEW_ARN=$(aws ecs register-task-definition \
+                                --cli-input-json "${NEW_TASK_DEF}" \
+                                --query 'taskDefinition.taskDefinitionArn' \
+                                --output text \
+                                --region "${AWS_REGION}")
+
+                            aws ecs update-service \
+                                --cluster         "${EC_CLUSTER}" \
+                                --service         "${SERVICE}" \
+                                --task-definition "${NEW_ARN}" \
+                                --force-new-deployment \
+                                --region          "${AWS_REGION}"
+
+                            echo "headend-gateway → ${NEW_ARN}"
+                        '''
+                    }
+                }
+
+                stage('pki-api') {
+                    steps {
+                        sh '''
+                            SHA="${RELEASE_SHA}"
+                            FAMILY="ensure-cloud-dev-pki-api-task"
+                            SERVICE="ensure-cloud-dev-pki-api-service"
+                            IMAGE="${ECR_REGISTRY}/ensure-cloud-pki-api:${SHA}"
+
+                            NEW_TASK_DEF=$(aws ecs describe-task-definition \
+                                --task-definition "${FAMILY}" \
+                                --query 'taskDefinition' \
+                                --output json \
+                                --region "${AWS_REGION}" \
+                                | jq --arg IMAGE "${IMAGE}" \
+                                    '.containerDefinitions[0].image = $IMAGE' \
+                                | jq 'del(.taskDefinitionArn,.revision,.status,.requiresAttributes,.compatibilities,.registeredAt,.registeredBy)')
+
+                            NEW_ARN=$(aws ecs register-task-definition \
+                                --cli-input-json "${NEW_TASK_DEF}" \
+                                --query 'taskDefinition.taskDefinitionArn' \
+                                --output text \
+                                --region "${AWS_REGION}")
+
+                            aws ecs update-service \
+                                --cluster         "${EC_CLUSTER}" \
+                                --service         "${SERVICE}" \
+                                --task-definition "${NEW_ARN}" \
+                                --force-new-deployment \
+                                --region          "${AWS_REGION}"
+
+                            echo "pki-api → ${NEW_ARN}"
+                        '''
+                    }
+                }
+
+                stage('stepca') {
+                    steps {
+                        sh '''
+                            SHA="${RELEASE_SHA}"
+                            FAMILY="ensure-cloud-dev-stepca-task"
+                            SERVICE="ensure-cloud-dev-stepca-service"
+                            IMAGE="${ECR_REGISTRY}/ensure-cloud-stepca:${SHA}"
+
+                            NEW_TASK_DEF=$(aws ecs describe-task-definition \
+                                --task-definition "${FAMILY}" \
+                                --query 'taskDefinition' \
+                                --output json \
+                                --region "${AWS_REGION}" \
+                                | jq --arg IMAGE "${IMAGE}" \
+                                    '.containerDefinitions[0].image = $IMAGE' \
+                                | jq 'del(.taskDefinitionArn,.revision,.status,.requiresAttributes,.compatibilities,.registeredAt,.registeredBy)')
+
+                            NEW_ARN=$(aws ecs register-task-definition \
+                                --cli-input-json "${NEW_TASK_DEF}" \
+                                --query 'taskDefinition.taskDefinitionArn' \
+                                --output text \
+                                --region "${AWS_REGION}")
+
+                            aws ecs update-service \
+                                --cluster         "${EC_CLUSTER}" \
+                                --service         "${SERVICE}" \
+                                --task-definition "${NEW_ARN}" \
+                                --force-new-deployment \
+                                --region          "${AWS_REGION}"
+
+                            echo "stepca → ${NEW_ARN}"
+                        '''
+                    }
+                }
+
+                stage('yardi-sync') {
+                    steps {
+                        sh '''
+                            SHA="${RELEASE_SHA}"
+                            FAMILY="yardi-sync-dev"
+                            SERVICE="sentrics-core-dev-yardi-sync-service"
+                            IMAGE="${ECR_REGISTRY}/sentrics-core-yardi-sync-repo:${SHA}"
+
+                            NEW_TASK_DEF=$(aws ecs describe-task-definition \
+                                --task-definition "${FAMILY}" \
+                                --query 'taskDefinition' \
+                                --output json \
+                                --region "${AWS_REGION}" \
+                                | jq --arg IMAGE "${IMAGE}" \
+                                    '.containerDefinitions[0].image = $IMAGE' \
+                                | jq 'del(.taskDefinitionArn,.revision,.status,.requiresAttributes,.compatibilities,.registeredAt,.registeredBy)')
+
+                            NEW_ARN=$(aws ecs register-task-definition \
+                                --cli-input-json "${NEW_TASK_DEF}" \
+                                --query 'taskDefinition.taskDefinitionArn' \
+                                --output text \
+                                --region "${AWS_REGION}")
+
+                            aws ecs update-service \
+                                --cluster         "${SC_CLUSTER}" \
+                                --service         "${SERVICE}" \
+                                --task-definition "${NEW_ARN}" \
+                                --force-new-deployment \
+                                --region          "${AWS_REGION}"
+
+                            echo "yardi-sync → ${NEW_ARN}"
+                        '''
+                    }
+                }
+            }
+        }
+
+        // =====================================================================
+        // STAGE 5 — Wait for ECS services to reach steady state
+        // aws ecs wait polls every 15s, times out at 10 minutes
+        // =====================================================================
+        stage('Wait for ECS Stability') {
+            steps {
+                sh '''
+                    echo "=== Waiting for ensure-cloud services ==="
+                    aws ecs wait services-stable \
+                        --cluster  "${EC_CLUSTER}" \
+                        --services \
+                            "ensure-cloud-dev-headend-gateway-service" \
+                            "ensure-cloud-dev-pki-api-service" \
+                            "ensure-cloud-dev-stepca-service" \
+                        --region   "${AWS_REGION}"
+
+                    echo "=== Waiting for sentrics-core services ==="
+                    aws ecs wait services-stable \
+                        --cluster  "${SC_CLUSTER}" \
+                        --services "sentrics-core-dev-yardi-sync-service" \
+                        --region   "${AWS_REGION}"
+
+                    echo "=== All ECS services stable — dev deploy complete ==="
+                '''
+            }
+        }
+    }
+
+    post {
+        success {
+            echo "Dev deployment PASSED — SHA ${params.RELEASE_SHA} is live in dev."
+        }
+        failure {
+            echo "Dev deployment FAILED for SHA ${params.RELEASE_SHA} — check stage logs above."
+        }
+        always {
+            cleanWs()
+        }
+    }
+}

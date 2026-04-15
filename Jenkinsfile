@@ -21,6 +21,12 @@
 pipeline {
     agent any
 
+    options {
+        buildDiscarder(logRotator(numToKeepStr: '30'))
+        timeout(time: 30, unit: 'MINUTES')
+        disableConcurrentBuilds()
+    }
+
     // -------------------------------------------------------------------------
     // Build parameters
     // -------------------------------------------------------------------------
@@ -59,6 +65,11 @@ pipeline {
         CARGO_REGISTRIES_CRATES_IO_PROTOCOL = 'sparse'
 
         SQLX_OFFLINE = 'true'
+
+        AWS_REGION      = 'us-east-1'
+        AWS_ACCOUNT_ID  = '892234674906'
+        ECR_REGISTRY    = '892234674906.dkr.ecr.us-east-1.amazonaws.com'
+        ARTIFACT_BUCKET = 'sentrics-ensure-lambda-artifacts-truststore'
     }
 
     stages {
@@ -266,7 +277,7 @@ pipeline {
                                 echo "===== ${ZIP} =====" | tee -a "${REPORT}"
                                 trivy fs \
                                     --severity "${TRIVY_SEVERITY}" \
-                                    --exit-code 0 \
+                                    --exit-code 1 \
                                     --no-progress \
                                     --format table \
                                     "${ZIP}" 2>&1 | tee -a "${REPORT}"
@@ -297,7 +308,7 @@ pipeline {
                                 echo "===== ${IMAGE} =====" | tee -a "${REPORT}"
                                 trivy image \
                                     --severity "${TRIVY_SEVERITY}" \
-                                    --exit-code 0 \
+                                    --exit-code 1 \
                                     --no-progress \
                                     --format table \
                                     "${IMAGE}" 2>&1 | tee -a "${REPORT}"
@@ -331,7 +342,90 @@ pipeline {
         }
 
         // =====================================================================
-        // STAGE 6 — Cache stats
+        // STAGE 6 — Publish Lambda zips to S3, Docker images to ECR, manifest
+        // =====================================================================
+        stage('Publish to S3 & ECR') {
+            steps {
+                sh '''
+                    SHA="${RELEASE_SHA:-${GIT_COMMIT}}"
+
+                    echo "=== Pushing Lambda zips to S3 ==="
+                    aws s3 cp ensure-cloud/out/headend-api.zip \
+                        "s3://${ARTIFACT_BUCKET}/lambda-artifacts/headend-api/headend-api-${SHA}.zip"
+                    aws s3 cp ensure-cloud/out/core-change-publisher.zip \
+                        "s3://${ARTIFACT_BUCKET}/lambda-artifacts/core-change-publisher/core-change-publisher-${SHA}.zip"
+                    aws s3 cp sentrics-core/out/resources-api.zip \
+                        "s3://${ARTIFACT_BUCKET}/lambda-artifacts/resources-api/resources-api-${SHA}.zip"
+                    aws s3 cp sentrics-core/out/migrate.zip \
+                        "s3://${ARTIFACT_BUCKET}/lambda-artifacts/migrate/migrate-${SHA}.zip"
+                    aws s3 cp sentrics-core/out/resources-change-logger.zip \
+                        "s3://${ARTIFACT_BUCKET}/lambda-artifacts/resources-change-logger/resources-change-logger-${SHA}.zip"
+                    echo "=== Lambda zips pushed ==="
+                '''
+                script {
+                    if (!params.SKIP_DOCKER_BUILDS) {
+                        sh '''
+                            SHA="${RELEASE_SHA:-${GIT_COMMIT}}"
+
+                            echo "=== Logging in to ECR ==="
+                            aws ecr get-login-password --region "${AWS_REGION}" \
+                                | docker login --username AWS --password-stdin "${ECR_REGISTRY}"
+
+                            echo "=== Pushing Docker images to ECR ==="
+                            for SERVICE in headend-gateway pki-api stepca; do
+                                REPO="${ECR_REGISTRY}/ensure-cloud-${SERVICE}"
+                                docker tag "${SERVICE}:${GIT_COMMIT}" "${REPO}:${SHA}"
+                                docker push "${REPO}:${SHA}"
+                                echo "Pushed ${REPO}:${SHA}"
+                            done
+
+                            docker tag "yardi-sync:${GIT_COMMIT}" \
+                                "${ECR_REGISTRY}/sentrics-core-yardi-sync-repo:${SHA}"
+                            docker push "${ECR_REGISTRY}/sentrics-core-yardi-sync-repo:${SHA}"
+                            echo "Pushed ${ECR_REGISTRY}/sentrics-core-yardi-sync-repo:${SHA}"
+                            echo "=== Docker images pushed ==="
+                        '''
+                    }
+                }
+                sh '''
+                    SHA="${RELEASE_SHA:-${GIT_COMMIT}}"
+                    BUILT_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+                    echo "=== Writing manifest.json ==="
+                    jq -n \
+                        --arg commit  "${SHA}" \
+                        --arg built   "${BUILT_AT}" \
+                        --arg bucket  "${ARTIFACT_BUCKET}" \
+                        --arg ecr     "${ECR_REGISTRY}" \
+                        --argjson skip_docker "${SKIP_DOCKER_BUILDS}" \
+                        '{
+                            commit:       $commit,
+                            built_at:     $built,
+                            skip_docker:  $skip_docker,
+                            lambdas: {
+                                "headend-api":             ("s3://" + $bucket + "/lambda-artifacts/headend-api/headend-api-"                         + $commit + ".zip"),
+                                "core-change-publisher":   ("s3://" + $bucket + "/lambda-artifacts/core-change-publisher/core-change-publisher-"     + $commit + ".zip"),
+                                "resources-api":           ("s3://" + $bucket + "/lambda-artifacts/resources-api/resources-api-"                     + $commit + ".zip"),
+                                "migrate":                 ("s3://" + $bucket + "/lambda-artifacts/migrate/migrate-"                                 + $commit + ".zip"),
+                                "resources-change-logger": ("s3://" + $bucket + "/lambda-artifacts/resources-change-logger/resources-change-logger-" + $commit + ".zip")
+                            },
+                            images: {
+                                "headend-gateway": ($ecr + "/ensure-cloud-headend-gateway:"        + $commit),
+                                "pki-api":         ($ecr + "/ensure-cloud-pki-api:"                + $commit),
+                                "stepca":          ($ecr + "/ensure-cloud-stepca:"                 + $commit),
+                                "yardi-sync":      ($ecr + "/sentrics-core-yardi-sync-repo:"       + $commit)
+                            }
+                        }' > /tmp/manifest.json
+
+                    aws s3 cp /tmp/manifest.json \
+                        "s3://${ARTIFACT_BUCKET}/builds/${SHA}/manifest.json"
+                    echo "=== Manifest published: s3://${ARTIFACT_BUCKET}/builds/${SHA}/manifest.json ==="
+                '''
+            }
+        }
+
+        // =====================================================================
+        // STAGE 7 — Cache stats
         // =====================================================================
         stage('Cache Stats') {
             steps {
@@ -354,13 +448,17 @@ pipeline {
     // =========================================================================
     post {
         success {
-            echo "Pipeline PASSED — all artifacts archived in Jenkins for build ${GIT_COMMIT}."
+            echo "Pipeline PASSED — artifacts published for ${GIT_COMMIT}. Triggering dev deployment..."
+            build job: 'dev-deploy',
+                  parameters: [string(name: 'RELEASE_SHA', value: "${GIT_COMMIT}")],
+                  wait: false
         }
         failure {
             echo "Pipeline FAILED — check stage logs above."
         }
         always {
             sh 'docker image prune -f || true'
+            cleanWs()
         }
     }
 }
