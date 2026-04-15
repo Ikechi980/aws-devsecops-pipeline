@@ -20,7 +20,7 @@ resource "aws_service_discovery_service" "stepca" {
   name = "${var.environment}-stepca"
 
   dns_config {
-    namespace_id = aws_service_discovery_private_dns_namespace.ensure_cloud.id
+    namespace_id   = aws_service_discovery_private_dns_namespace.ensure_cloud.id
     routing_policy = "MULTIVALUE"
 
     dns_records {
@@ -37,7 +37,7 @@ resource "aws_service_discovery_service" "pki_api" {
   name = "${var.environment}-pki-api"
 
   dns_config {
-    namespace_id  = aws_service_discovery_private_dns_namespace.ensure_cloud.id
+    namespace_id   = aws_service_discovery_private_dns_namespace.ensure_cloud.id
     routing_policy = "MULTIVALUE"
 
     dns_records {
@@ -226,10 +226,10 @@ resource "aws_sns_topic" "core_change_events" {
 
 #  Core Change Events SQS Queue
 resource "aws_sqs_queue" "core_change_events_dlq" {
-  name                       = "${var.project}-${var.environment}-core-change-events-dlq"
-  message_retention_seconds  = 1209600
-  sqs_managed_sse_enabled    = true
-  tags                       = var.tags
+  name                      = "${var.project}-${var.environment}-core-change-events-dlq"
+  message_retention_seconds = 1209600
+  sqs_managed_sse_enabled   = true
+  tags                      = var.tags
 }
 
 resource "aws_sqs_queue" "core_change_events" {
@@ -237,7 +237,7 @@ resource "aws_sqs_queue" "core_change_events" {
   message_retention_seconds  = 1209600
   visibility_timeout_seconds = 60
   sqs_managed_sse_enabled    = true
-  redrive_policy             = jsonencode({
+  redrive_policy = jsonencode({
     deadLetterTargetArn = aws_sqs_queue.core_change_events_dlq.arn
     maxReceiveCount     = 5
   })
@@ -416,18 +416,18 @@ resource "aws_lambda_function" "headend_api" {
   s3_bucket     = var.lambda_s3_bucket
   s3_key        = var.lambda_headend_api_s3_key
 
-  timeout = 30
+  timeout     = 30
   memory_size = 512
 
   environment {
     variables = merge(
       {
-        SYSTEMS_API_BASE_URL        = var.headend_api_systems_api_base_url
-        CORE_RESOURCES_API_BASE_URL = data.terraform_remote_state.sentrics_core.outputs.container_api_endpoint
+        SYSTEMS_API_BASE_URL           = var.headend_api_systems_api_base_url
+        CORE_RESOURCES_API_BASE_URL    = data.terraform_remote_state.sentrics_core.outputs.container_api_endpoint
         EVENTS_MONGO_URL_SSM_PARAMETER = var.headend_api_events_mongo_url_ssm_parameter
-        EVENTS_LIMIT_DEFAULT        = tostring(var.headend_api_events_limit_default)
-        EVENTS_LIMIT_MAX            = tostring(var.headend_api_events_limit_max)
-        RUST_LOG                    = var.headend_api_rust_log
+        EVENTS_LIMIT_DEFAULT           = tostring(var.headend_api_events_limit_default)
+        EVENTS_LIMIT_MAX               = tostring(var.headend_api_events_limit_max)
+        RUST_LOG                       = var.headend_api_rust_log
       },
       var.headend_api_allow_unauthenticated ? { ALLOW_UNAUTHENTICATED = "1" } : {}
     )
@@ -450,15 +450,15 @@ resource "aws_lambda_function" "core_change_publisher" {
   s3_bucket     = var.lambda_s3_bucket
   s3_key        = var.lambda_core_change_publisher_s3_key
 
-  timeout = 30
+  timeout     = 30
   memory_size = 512
 
   environment {
     variables = merge(
       {
-        SYSTEMS_API_BASE_URL = var.core_change_publisher_systems_api_base_url
+        SYSTEMS_API_BASE_URL  = var.core_change_publisher_systems_api_base_url
         HEADEND_SNS_TOPIC_ARN = module.headend_messages_sns.topic_arn
-        RUST_LOG = var.core_change_publisher_rust_log
+        RUST_LOG              = var.core_change_publisher_rust_log
       },
       var.core_change_publisher_aws_endpoint_url != "" ? { AWS_ENDPOINT_URL = var.core_change_publisher_aws_endpoint_url } : {}
     )
@@ -482,10 +482,10 @@ resource "aws_lambda_event_source_mapping" "core_change_events" {
 
 #  Headend API Gateway HTTP API
 resource "aws_apigatewayv2_api" "headend_api" {
-  name          = "${var.project}-${var.environment}-headend-api"
-  protocol_type = "HTTP"
+  name                         = "${var.project}-${var.environment}-headend-api"
+  protocol_type                = "HTTP"
   disable_execute_api_endpoint = true
-  tags          = var.tags
+  tags                         = var.tags
 }
 
 #  Headend API Gateway Lambda Integration
@@ -668,12 +668,12 @@ resource "aws_ecs_service" "pki_api" {
 
 # StepCA ECS service (managed directly to attach Cloud Map service discovery)
 resource "aws_ecs_service" "stepca" {
-  name                    = "${var.project}-${var.environment}-stepca-service"
-  cluster                 = module.ecs_cluster.cluster_arns["main"]
-  task_definition         = aws_ecs_task_definition.ecs_task_definitions["stepca"].arn
-  desired_count           = local.ecs_services["stepca"].desired_count
-  launch_type             = "FARGATE"
-  enable_execute_command  = local.ecs_services["stepca"].enable_execute_command
+  name                          = "${var.project}-${var.environment}-stepca-service"
+  cluster                       = module.ecs_cluster.cluster_arns["main"]
+  task_definition               = aws_ecs_task_definition.ecs_task_definitions["stepca"].arn
+  desired_count                 = local.ecs_services["stepca"].desired_count
+  launch_type                   = "FARGATE"
+  enable_execute_command        = local.ecs_services["stepca"].enable_execute_command
   availability_zone_rebalancing = "DISABLED"
 
   service_registries {
@@ -726,6 +726,6 @@ module "autoscaling" {
   scale_in_cooldown  = var.scale_in_cooldown
   scale_out_cooldown = var.scale_out_cooldown
 
-  tags = var.tags
+  tags       = var.tags
   depends_on = [module.Ecs-service["headend-gateway"]]
 }

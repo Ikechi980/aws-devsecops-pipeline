@@ -51,13 +51,13 @@ resource "aws_codepipeline" "master" {
       name = "BuildArtifacts"
 
       action {
-        name             = "BuildYardiImage"
-        category         = "Build"
-        owner            = "AWS"
-        provider         = "CodeBuild"
-        version          = "1"
-        input_artifacts  = ["AppSource"]
-        run_order        = 1
+        name            = "BuildYardiImage"
+        category        = "Build"
+        owner           = "AWS"
+        provider        = "CodeBuild"
+        version         = "1"
+        input_artifacts = ["AppSource"]
+        run_order       = 1
         configuration = {
           ProjectName          = var.yardi_image_build_project
           EnvironmentVariables = local.build_action_env_vars
@@ -65,13 +65,13 @@ resource "aws_codepipeline" "master" {
       }
 
       action {
-        name             = "BuildLambdaZips"
-        category         = "Build"
-        owner            = "AWS"
-        provider         = "CodeBuild"
-        version          = "1"
-        input_artifacts  = ["AppSource"]
-        run_order        = 1
+        name            = "BuildLambdaZips"
+        category        = "Build"
+        owner           = "AWS"
+        provider        = "CodeBuild"
+        version         = "1"
+        input_artifacts = ["AppSource"]
+        run_order       = 1
         configuration = {
           ProjectName          = var.lambda_zip_build_project
           EnvironmentVariables = local.build_action_env_vars

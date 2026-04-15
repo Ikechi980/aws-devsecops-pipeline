@@ -1,8 +1,8 @@
 resource "aws_dynamodb_table" "resources_change_log" {
-  name         = "${var.change_log_table_name}-${var.environment}"
-  billing_mode = "PAY_PER_REQUEST"
-  hash_key     = "community_pk"
-  range_key    = "timestamp_sk"
+  name                        = "${var.change_log_table_name}-${var.environment}"
+  billing_mode                = "PAY_PER_REQUEST"
+  hash_key                    = "community_pk"
+  range_key                   = "timestamp_sk"
   deletion_protection_enabled = false
 
   attribute {

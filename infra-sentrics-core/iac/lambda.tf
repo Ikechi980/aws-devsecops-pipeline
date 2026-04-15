@@ -15,15 +15,15 @@ resource "aws_lambda_function" "api" {
   publish     = true
 
   vpc_config {
-    subnet_ids = local.private_subnet_ids
+    subnet_ids         = local.private_subnet_ids
     security_group_ids = [aws_security_group.lambda.id]
   }
 
   environment {
     variables = {
-      RUST_LOG     = "info"
+      RUST_LOG      = "info"
       SNS_TOPIC_ARN = aws_sns_topic.resources_change_events.arn
-      DATABASE_URL = "postgres://${var.database_username}:${urlencode(random_password.db.result)}@${aws_db_instance.this.address}:${var.database_port}/${var.database_name}"
+      DATABASE_URL  = "postgres://${var.database_username}:${urlencode(random_password.db.result)}@${aws_db_instance.this.address}:${var.database_port}/${var.database_name}"
     }
   }
 
@@ -53,7 +53,7 @@ resource "aws_lambda_function" "migrate" {
   publish     = true
 
   vpc_config {
-    subnet_ids = local.private_subnet_ids
+    subnet_ids         = local.private_subnet_ids
     security_group_ids = [aws_security_group.lambda.id]
   }
 
@@ -104,9 +104,9 @@ resource "aws_lambda_function" "resources_change_logger" {
 }
 
 resource "aws_lambda_event_source_mapping" "resources_change_logger" {
-  event_source_arn       = aws_sqs_queue.resources_change_logger.arn
-  function_name          = aws_lambda_function.resources_change_logger.arn
-  batch_size             = var.change_logger_batch_size
-  enabled                = true
+  event_source_arn        = aws_sqs_queue.resources_change_logger.arn
+  function_name           = aws_lambda_function.resources_change_logger.arn
+  batch_size              = var.change_logger_batch_size
+  enabled                 = true
   function_response_types = ["ReportBatchItemFailures"]
 }

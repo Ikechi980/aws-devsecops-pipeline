@@ -30,7 +30,7 @@ module "ecs_service" {
   desired_count          = var.ecs_service_desired_count
   enable_execute_command = var.ecs_service_enable_execute_command
 
-  
+
   availability_zone_rebalancing      = "DISABLED"
   deployment_minimum_healthy_percent = 0
   deployment_maximum_percent         = 100
@@ -48,7 +48,7 @@ module "ecs_service" {
 # Ecs CloudWatch Log Group
 
 module "ecs_logs" {
-  source            = "git::https://github.com/SilversphereInc/iac.git//terraform/modules/ecs-cluster/ecs-logs?ref=develop2-clean-asg-elb"
+  source = "git::https://github.com/SilversphereInc/iac.git//terraform/modules/ecs-cluster/ecs-logs?ref=develop2-clean-asg-elb"
 
   services          = var.ecs_services
   retention_in_days = var.log_retention

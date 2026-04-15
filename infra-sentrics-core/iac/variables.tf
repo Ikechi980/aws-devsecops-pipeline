@@ -165,9 +165,9 @@ variable "yardi_sync_failures_topic_name" {
 }
 
 variable "migrate_lambda_name" {
-  type = string
+  type        = string
   description = "The name for the migration lambda"
-  
+
 }
 
 variable "lambda_sg_name" {
@@ -268,7 +268,7 @@ variable "cluster_map" {
 }
 
 
- 
+
 
 variable "ecs_task_role_arn" {
   description = "IAM role ARN to use for ECS task execution and task role"

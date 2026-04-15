@@ -51,13 +51,13 @@ resource "aws_codepipeline" "master" {
       name = "BuildArtifacts"
 
       action {
-        name             = "BuildStepcaImage"
-        category         = "Build"
-        owner            = "AWS"
-        provider         = "CodeBuild"
-        version          = "1"
-        input_artifacts  = ["AppSource"]
-        run_order        = 1
+        name            = "BuildStepcaImage"
+        category        = "Build"
+        owner           = "AWS"
+        provider        = "CodeBuild"
+        version         = "1"
+        input_artifacts = ["AppSource"]
+        run_order       = 1
         configuration = {
           ProjectName          = var.stepca_image_build_project
           EnvironmentVariables = local.build_action_env_vars
@@ -65,13 +65,13 @@ resource "aws_codepipeline" "master" {
       }
 
       action {
-        name             = "BuildHeadendGatewayImage"
-        category         = "Build"
-        owner            = "AWS"
-        provider         = "CodeBuild"
-        version          = "1"
-        input_artifacts  = ["AppSource"]
-        run_order        = 1
+        name            = "BuildHeadendGatewayImage"
+        category        = "Build"
+        owner           = "AWS"
+        provider        = "CodeBuild"
+        version         = "1"
+        input_artifacts = ["AppSource"]
+        run_order       = 1
         configuration = {
           ProjectName          = var.headend_gateway_image_build_project
           EnvironmentVariables = local.build_action_env_vars
@@ -79,13 +79,13 @@ resource "aws_codepipeline" "master" {
       }
 
       action {
-        name             = "BuildPkiApiImage"
-        category         = "Build"
-        owner            = "AWS"
-        provider         = "CodeBuild"
-        version          = "1"
-        input_artifacts  = ["AppSource"]
-        run_order        = 1
+        name            = "BuildPkiApiImage"
+        category        = "Build"
+        owner           = "AWS"
+        provider        = "CodeBuild"
+        version         = "1"
+        input_artifacts = ["AppSource"]
+        run_order       = 1
         configuration = {
           ProjectName          = var.pki_api_image_build_project
           EnvironmentVariables = local.build_action_env_vars
@@ -93,13 +93,13 @@ resource "aws_codepipeline" "master" {
       }
 
       action {
-        name             = "BuildLambdaZips"
-        category         = "Build"
-        owner            = "AWS"
-        provider         = "CodeBuild"
-        version          = "1"
-        input_artifacts  = ["AppSource"]
-        run_order        = 1
+        name            = "BuildLambdaZips"
+        category        = "Build"
+        owner           = "AWS"
+        provider        = "CodeBuild"
+        version         = "1"
+        input_artifacts = ["AppSource"]
+        run_order       = 1
         configuration = {
           ProjectName          = var.lambda_zip_build_project
           EnvironmentVariables = local.build_action_env_vars
@@ -120,7 +120,7 @@ resource "aws_codepipeline" "master" {
         provider        = "CodeBuild"
         version         = "1"
         input_artifacts = ["AppSource"]
-        run_order = 1
+        run_order       = 1
         configuration = {
           ProjectName          = var.security_scan_project
           PrimarySource        = "AppSource"

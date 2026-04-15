@@ -15,7 +15,7 @@ locals {
       cpu                    = "512"
       memory                 = "1024"
       volumes                = []
-      load_balancer          = [
+      load_balancer = [
         {
           target_group_arn = aws_lb_target_group.headend_gateway.arn
           container_name   = "headend-gateway"
@@ -33,14 +33,14 @@ locals {
       assign_public_ip       = false
       cpu                    = "512"
       memory                 = "1024"
-      volumes                = [
+      volumes = [
         {
           name            = "stepca-efs"
           file_system_id  = var.stepca_efs_file_system_id
           access_point_id = var.stepca_efs_access_point_id
         }
       ]
-      load_balancer          = []
+      load_balancer = []
     }
     "stepca" = {
       desired_count          = 1
@@ -52,14 +52,14 @@ locals {
       assign_public_ip       = false
       cpu                    = "512"
       memory                 = "1024"
-      volumes                = [
+      volumes = [
         {
           name            = "stepca-efs"
           file_system_id  = var.stepca_efs_file_system_id
           access_point_id = var.stepca_efs_access_point_id
         }
       ]
-      load_balancer          = []
+      load_balancer = []
     }
   }
 }
