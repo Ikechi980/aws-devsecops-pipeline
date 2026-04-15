@@ -197,9 +197,10 @@ pipeline {
 
                 stage('headend-gateway') {
                     steps {
-                        dir('ensure-cloud/headend-gateway/infra/headend-gateway') {
+                        dir('ensure-cloud/headend-gateway') {
                             sh '''
-                                docker build -t headend-gateway:"${GIT_COMMIT}" .
+                                docker build -t headend-gateway:"${GIT_COMMIT}" \
+                                    -f infra/headend-gateway/Dockerfile .
                                 mkdir -p "${WORKSPACE}/docker-out"
                                 docker save headend-gateway:"${GIT_COMMIT}" \
                                     | gzip > "${WORKSPACE}/docker-out/headend-gateway.tar.gz"
@@ -210,9 +211,10 @@ pipeline {
 
                 stage('pki-api') {
                     steps {
-                        dir('ensure-cloud/pki/infra/pki-api') {
+                        dir('ensure-cloud/pki') {
                             sh '''
-                                docker build -t pki-api:"${GIT_COMMIT}" .
+                                docker build -t pki-api:"${GIT_COMMIT}" \
+                                    -f infra/pki-api/Dockerfile .
                                 mkdir -p "${WORKSPACE}/docker-out"
                                 docker save pki-api:"${GIT_COMMIT}" \
                                     | gzip > "${WORKSPACE}/docker-out/pki-api.tar.gz"
@@ -236,10 +238,10 @@ pipeline {
 
                 stage('yardi-sync') {
                     steps {
-                        dir('sentrics-core') {
+                        dir('sentrics-core/yardi-sync') {
                             sh '''
                                 docker build -t yardi-sync:"${GIT_COMMIT}" \
-                                    -f yardi-sync/infra/yardi-sync/Dockerfile .
+                                    -f infra/yardi-sync/Dockerfile .
                                 mkdir -p "${WORKSPACE}/docker-out"
                                 docker save yardi-sync:"${GIT_COMMIT}" \
                                     | gzip > "${WORKSPACE}/docker-out/yardi-sync.tar.gz"
