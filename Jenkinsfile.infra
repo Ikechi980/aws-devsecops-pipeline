@@ -219,7 +219,7 @@ ${links.join('\n')}
 // =============================================================================
 
 def tfPlan(String tfDir, String stackName) {
-    withCredentials([string(credentialsId: 'github-pat', variable: 'GITHUB_PAT')]) {
+    withCredentials([usernamePassword(credentialsId: 'github-pat', usernameVariable: 'GIT_USER', passwordVariable: 'GITHUB_PAT')]) {
     dir(tfDir) {
         sh """
             export TF_LOG="${params.TF_LOG}"
@@ -275,7 +275,7 @@ def tfPlan(String tfDir, String stackName) {
 }
 
 def tfApply(String tfDir, String stackName) {
-    withCredentials([string(credentialsId: 'github-pat', variable: 'GITHUB_PAT')]) {
+    withCredentials([usernamePassword(credentialsId: 'github-pat', usernameVariable: 'GIT_USER', passwordVariable: 'GITHUB_PAT')]) {
     dir(tfDir) {
         sh """
             export TF_LOG="${params.TF_LOG}"
