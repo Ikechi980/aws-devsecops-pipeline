@@ -219,9 +219,13 @@ ${links.join('\n')}
 // =============================================================================
 
 def tfPlan(String tfDir, String stackName) {
+    withCredentials([string(credentialsId: 'github-pat', variable: 'GITHUB_PAT')]) {
     dir(tfDir) {
         sh """
             export TF_LOG="${params.TF_LOG}"
+
+            # Allow Terraform's git subprocess to clone private modules
+            git config --global url."https://\${GITHUB_PAT}@github.com/".insteadOf "https://github.com/"
 
             # ------------------------------------------------------------------
             # Substitute <RELEASE_SHA> placeholder in a working copy of the
@@ -267,14 +271,18 @@ def tfPlan(String tfDir, String stackName) {
     }
     archiveArtifacts artifacts: "${tfDir}/plan.txt",    allowEmptyArchive: false
     archiveArtifacts artifacts: "${tfDir}/plan.tfplan", allowEmptyArchive: false
+    } // withCredentials
 }
 
 def tfApply(String tfDir, String stackName) {
+    withCredentials([string(credentialsId: 'github-pat', variable: 'GITHUB_PAT')]) {
     dir(tfDir) {
         sh """
             export TF_LOG="${params.TF_LOG}"
 
-            echo "=== [\${stackName}] terraform apply ==="
+            git config --global url."https://\${GITHUB_PAT}@github.com/".insteadOf "https://github.com/"
+
+            echo "=== [${stackName}] terraform apply ==="
             terraform apply \\
                 -input=false \\
                 -auto-approve \\
@@ -283,4 +291,5 @@ def tfApply(String tfDir, String stackName) {
             echo "=== Apply complete (${stackName}) ==="
         """
     }
+    } // withCredentials
 }
