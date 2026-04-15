@@ -1,0 +1,7 @@
+[workspace]
+members = [
+    "resources-api",
+    "resources-change-logger",
+    "yardi-sync",
+]
+resolver = "2"

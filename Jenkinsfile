@@ -154,27 +154,17 @@ pipeline {
                                 echo "=== Cache size (sentrics-core) ==="
                                 du -sh "${CARGO_TARGET_DIR}/" 2>/dev/null || echo "cold"
 
-                                echo "Building resources-api and migrate..."
-                                cd resources-api
+                                echo "Building resources-api, migrate, and resources-change-logger..."
                                 SQLX_OFFLINE=true cargo lambda build --release \
-                                    --output-format zip --compiler cargo --bin resources-api
-                                SQLX_OFFLINE=true cargo lambda build --release \
-                                    --output-format zip --compiler cargo --bin migrate
-                                cp "${CARGO_TARGET_DIR}/lambda/resources-api/bootstrap.zip" ../resources-api.zip
-                                cp "${CARGO_TARGET_DIR}/lambda/migrate/bootstrap.zip"        ../migrate.zip
-
-                                echo "Building resources-change-logger..."
-                                cd ../resources-change-logger
-                                cargo lambda build --release --output-format zip \
+                                    --output-format zip --compiler cargo \
+                                    --bin resources-api \
+                                    --bin migrate \
                                     --bin resources-change-logger
-                                cp "${CARGO_TARGET_DIR}/lambda/resources-change-logger/bootstrap.zip" \
-                                    ../resources-change-logger.zip
 
-                                cd ..
                                 mkdir -p out
-                                mv resources-api.zip           out/resources-api.zip
-                                mv migrate.zip                 out/migrate.zip
-                                mv resources-change-logger.zip out/resources-change-logger.zip
+                                cp "${CARGO_TARGET_DIR}/lambda/resources-api/bootstrap.zip"           out/resources-api.zip
+                                cp "${CARGO_TARGET_DIR}/lambda/migrate/bootstrap.zip"                 out/migrate.zip
+                                cp "${CARGO_TARGET_DIR}/lambda/resources-change-logger/bootstrap.zip" out/resources-change-logger.zip
 
                                 echo "=== sentrics-core Lambda build complete ==="
                                 ls -lh out/
