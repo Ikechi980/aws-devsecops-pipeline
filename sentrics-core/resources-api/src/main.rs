@@ -1,3 +1,4 @@
+// v0.1.1
 use lambda_http::{Error, run};
 use sqlx::postgres::PgPoolOptions;
 use std::sync::Arc;

@@ -1,3 +1,4 @@
+// v0.1.1
 use crate::core_resources::CoreResourcesClient;
 use crate::events_repo::MongoEventsRepo;
 use crate::secrets::resolve_ssm_parameter;

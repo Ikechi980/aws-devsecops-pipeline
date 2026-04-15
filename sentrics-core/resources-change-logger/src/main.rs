@@ -1,3 +1,4 @@
+// v0.1.1
 use anyhow::Result;
 use aws_lambda_events::event::sqs::SqsEvent;
 use lambda_runtime::{LambdaEvent, service_fn};
