@@ -651,35 +651,35 @@ pipeline {
         // =====================================================================
         stage('CVE Gate') {
             steps {
-                sh """#!/usr/bin/env bash
+                sh '''#!/usr/bin/env bash
                     SUMMARY_FILE="trivy-reports/security-scan-summary.tsv"
-                    [ -f "\${SUMMARY_FILE}" ] || { echo "ERROR: Missing \${SUMMARY_FILE}"; exit 1; }
+                    [ -f "${SUMMARY_FILE}" ] || { echo "ERROR: Missing ${SUMMARY_FILE}"; exit 1; }
 
                     echo ""
                     echo "=== Security Scan Findings Summary ==="
                     if command -v column >/dev/null 2>&1; then
-                        column -t -s $'\\t' "\${SUMMARY_FILE}"
+                        column -t -s $'\t' "${SUMMARY_FILE}"
                     else
-                        cat "\${SUMMARY_FILE}"
+                        cat "${SUMMARY_FILE}"
                     fi
 
                     HAS_DETAIL=0
                     for DETAIL in trivy-reports/detail-*.txt; do
-                        [ -f "\${DETAIL}" ] || continue
-                        if [ "\${HAS_DETAIL}" -eq 0 ]; then
+                        [ -f "${DETAIL}" ] || continue
+                        if [ "${HAS_DETAIL}" -eq 0 ]; then
                             echo ""
                             echo "Vulnerability details for deployables with CRITICAL/HIGH findings:"
                             HAS_DETAIL=1
                         fi
-                        echo "--- \${DETAIL} ---"
-                        cat "\${DETAIL}"
+                        echo "--- ${DETAIL} ---"
+                        cat "${DETAIL}"
                         echo ""
                     done
 
-                    if [ "\${HAS_DETAIL}" -eq 0 ]; then
+                    if [ "${HAS_DETAIL}" -eq 0 ]; then
                         echo "No CRITICAL/HIGH vulnerability detail files were generated."
                     fi
-                """
+                '''
             }
         }
 
