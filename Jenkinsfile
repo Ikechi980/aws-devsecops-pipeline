@@ -166,14 +166,14 @@ pipeline {
                         require_tool "${tool}"
                     done
 
-                    bash --version | head -n1
+                    bash --version | sed -n '1p'
                     docker --version
                     jq --version
                     python3 --version
                     trivy --version
                     aws --version
-                    unzip -v | head -n1
-                    gzip --version | head -n1
+                    unzip -v | sed -n '1p'
+                    gzip --version 2>&1 | sed -n '1p'
 
                     verify_rust_repo() {
                         local repo="$1"
