@@ -44,7 +44,17 @@ pipeline {
         string(
             name: 'TRIVY_SEVERITY',
             defaultValue: 'HIGH,CRITICAL',
-            description: 'Severity levels to scan — pipeline fails if any are found'
+            description: 'Severity levels to include in the scan'
+        )
+        string(
+            name: 'MAX_CRITICAL',
+            defaultValue: '0',
+            description: 'Max CRITICAL CVEs allowed across all artifacts — publish is blocked if total exceeds this'
+        )
+        string(
+            name: 'MAX_HIGH',
+            defaultValue: '0',
+            description: 'Max HIGH CVEs allowed across all artifacts — publish is blocked if total exceeds this'
         )
     }
 
@@ -269,18 +279,20 @@ pipeline {
                             REPORT="trivy-reports/trivy-lambda-scan.txt"
                             SUMMARY="trivy-reports/lambda-cve-summary.csv"
                             : > "${REPORT}"
-                            echo "artifact,critical,high" > "${SUMMARY}"
+                            echo "type,path,name,critical,high" > "${SUMMARY}"
 
-                            for ZIP in \
-                                ensure-cloud/out/headend-api.zip \
-                                ensure-cloud/out/core-change-publisher.zip \
-                                sentrics-core/out/resources-api.zip \
-                                sentrics-core/out/migrate.zip \
-                                sentrics-core/out/resources-change-logger.zip
+                            for ENTRY in \
+                                "ensure-cloud/out/headend-api.zip:headend-api" \
+                                "ensure-cloud/out/core-change-publisher.zip:core-change-publisher" \
+                                "sentrics-core/out/resources-api.zip:resources-api" \
+                                "sentrics-core/out/migrate.zip:migrate" \
+                                "sentrics-core/out/resources-change-logger.zip:resources-change-logger"
                             do
+                                ZIP="${ENTRY%%:*}"
+                                NAME="${ENTRY##*:}"
                                 echo "===== ${ZIP} =====" | tee -a "${REPORT}"
 
-                                # JSON scan for per-artifact counts
+                                # JSON scan — count CRITICAL/HIGH per artifact
                                 trivy fs \
                                     --severity "${TRIVY_SEVERITY}" \
                                     --exit-code 0 \
@@ -289,7 +301,7 @@ pipeline {
                                     "${ZIP}" > trivy-reports/tmp-scan.json 2>/dev/null || true
 
                                 COUNTS=$(python3 - <<'PYEOF'
-import json, sys
+import json
 try:
     d = json.load(open("trivy-reports/tmp-scan.json"))
     c = sum(1 for r in d.get("Results", []) for v in (r.get("Vulnerabilities") or []) if v.get("Severity") == "CRITICAL")
@@ -301,16 +313,21 @@ PYEOF
 )
                                 CRITICAL=$(echo "${COUNTS}" | awk '{print $1}')
                                 HIGH=$(echo "${COUNTS}" | awk '{print $2}')
-                                echo "${ZIP},${CRITICAL},${HIGH}" >> "${SUMMARY}"
+                                echo "lambda,${ZIP},${NAME},${CRITICAL},${HIGH}" >> "${SUMMARY}"
 
-                                # Table scan for human-readable detail in the report
-                                trivy fs \
+                                # Table scan — human-readable detail, captured once
+                                TABLE=$(trivy fs \
                                     --severity "${TRIVY_SEVERITY}" \
                                     --exit-code 0 \
                                     --no-progress \
                                     --format table \
-                                    "${ZIP}" 2>&1 | tee -a "${REPORT}"
-                                echo "" >> "${REPORT}"
+                                    "${ZIP}" 2>&1)
+                                printf '%s\n\n' "${TABLE}" >> "${REPORT}"
+
+                                # Per-artifact detail file (used by summary stage)
+                                if [ "${CRITICAL}" -gt 0 ] || [ "${HIGH}" -gt 0 ]; then
+                                    printf '%s\n' "${TABLE}" > "trivy-reports/detail-lambda-${NAME}.txt"
+                                fi
                             done
 
                             rm -f trivy-reports/tmp-scan.json
@@ -329,14 +346,10 @@ PYEOF
                             REPORT="trivy-reports/trivy-docker-scan.txt"
                             SUMMARY="trivy-reports/docker-cve-summary.csv"
                             : > "${REPORT}"
-                            echo "artifact,critical,high" > "${SUMMARY}"
+                            echo "type,path,name,critical,high" > "${SUMMARY}"
 
-                            for IMAGE in \
-                                headend-gateway:"${GIT_COMMIT}" \
-                                pki-api:"${GIT_COMMIT}" \
-                                stepca:"${GIT_COMMIT}" \
-                                yardi-sync:"${GIT_COMMIT}"
-                            do
+                            for NAME in headend-gateway pki-api stepca yardi-sync; do
+                                IMAGE="${NAME}:${GIT_COMMIT}"
                                 echo "===== ${IMAGE} =====" | tee -a "${REPORT}"
 
                                 trivy image \
@@ -347,7 +360,7 @@ PYEOF
                                     "${IMAGE}" > trivy-reports/tmp-scan.json 2>/dev/null || true
 
                                 COUNTS=$(python3 - <<'PYEOF'
-import json, sys
+import json
 try:
     d = json.load(open("trivy-reports/tmp-scan.json"))
     c = sum(1 for r in d.get("Results", []) for v in (r.get("Vulnerabilities") or []) if v.get("Severity") == "CRITICAL")
@@ -359,15 +372,19 @@ PYEOF
 )
                                 CRITICAL=$(echo "${COUNTS}" | awk '{print $1}')
                                 HIGH=$(echo "${COUNTS}" | awk '{print $2}')
-                                echo "${IMAGE},${CRITICAL},${HIGH}" >> "${SUMMARY}"
+                                echo "image,${IMAGE},${NAME},${CRITICAL},${HIGH}" >> "${SUMMARY}"
 
-                                trivy image \
+                                TABLE=$(trivy image \
                                     --severity "${TRIVY_SEVERITY}" \
                                     --exit-code 0 \
                                     --no-progress \
                                     --format table \
-                                    "${IMAGE}" 2>&1 | tee -a "${REPORT}"
-                                echo "" >> "${REPORT}"
+                                    "${IMAGE}" 2>&1)
+                                printf '%s\n\n' "${TABLE}" >> "${REPORT}"
+
+                                if [ "${CRITICAL}" -gt 0 ] || [ "${HIGH}" -gt 0 ]; then
+                                    printf '%s\n' "${TABLE}" > "trivy-reports/detail-image-${NAME}.txt"
+                                fi
                             done
 
                             rm -f trivy-reports/tmp-scan.json
@@ -398,55 +415,74 @@ PYEOF
         }
 
         // =====================================================================
-        // STAGE 5b — CVE Summary & Gate
-        // Reads the per-artifact summary CSVs produced by the scan stage,
-        // prints a formatted table, then fails the pipeline if any findings
-        // exist so that nothing gets uploaded to S3 or ECR.
+        // STAGE 6 — CVE Gate
+        // Prints the per-artifact scan summary and the full CVE detail tables
+        // for any findings.  Fails (blocking publish) when the total
+        // CRITICAL or HIGH count exceeds the MAX_CRITICAL / MAX_HIGH
+        // thresholds set in the build parameters.
         // =====================================================================
-        stage('CVE Summary & Gate') {
+        stage('CVE Gate') {
             steps {
-                sh '''
+                sh """
                     echo ""
-                    echo "============================================================"
-                    echo "  CVE SCAN SUMMARY"
-                    echo "============================================================"
-                    printf "%-52s %8s %8s\\n" "Artifact" "CRITICAL" "HIGH"
-                    printf "%-52s %8s %8s\\n" "----------------------------------------------------" "--------" "--------"
+                    echo "=== Security Scan Findings Summary ==="
+                    printf "%-8s %-25s %-10s %-6s\\n" "TYPE" "DEPLOYABLE" "CRITICAL" "HIGH"
 
                     TOTAL_CRITICAL=0
                     TOTAL_HIGH=0
+                    HAS_FINDINGS=0
 
-                    for CSV in \
-                        trivy-reports/lambda-cve-summary.csv \
+                    for CSV in \\
+                        trivy-reports/lambda-cve-summary.csv \\
                         trivy-reports/docker-cve-summary.csv
                     do
-                        [ -f "${CSV}" ] || continue
-                        while IFS=',' read -r artifact critical high; do
-                            [ "${artifact}" = "artifact" ] && continue
-                            printf "%-52s %8s %8s\\n" "${artifact}" "${critical}" "${high}"
-                            TOTAL_CRITICAL=$((TOTAL_CRITICAL + critical))
-                            TOTAL_HIGH=$((TOTAL_HIGH + high))
-                        done < "${CSV}"
+                        [ -f "\${CSV}" ] || continue
+                        while IFS=',' read -r type path name critical high; do
+                            [ "\${type}" = "type" ] && continue
+                            printf "%-8s %-25s %-10s %-6s\\n" \\
+                                "\${type}" "\${name}" "\${critical}" "\${high}"
+                            TOTAL_CRITICAL=\$((TOTAL_CRITICAL + critical))
+                            TOTAL_HIGH=\$((TOTAL_HIGH + high))
+                            if [ "\${critical}" -gt 0 ] || [ "\${high}" -gt 0 ]; then
+                                HAS_FINDINGS=1
+                            fi
+                        done < "\${CSV}"
                     done
 
-                    printf "%-52s %8s %8s\\n" "----------------------------------------------------" "--------" "--------"
-                    printf "%-52s %8s %8s\\n" "TOTAL" "${TOTAL_CRITICAL}" "${TOTAL_HIGH}"
-                    echo "============================================================"
                     echo ""
+                    echo "Total: CRITICAL=\${TOTAL_CRITICAL}  HIGH=\${TOTAL_HIGH}"
+                    echo "Thresholds: MAX_CRITICAL=${params.MAX_CRITICAL}  MAX_HIGH=${params.MAX_HIGH}"
 
-                    if [ "${TOTAL_CRITICAL}" -gt 0 ] || [ "${TOTAL_HIGH}" -gt 0 ]; then
-                        echo "GATE FAILED: ${TOTAL_CRITICAL} CRITICAL and ${TOTAL_HIGH} HIGH CVEs detected."
-                        echo "Review trivy-reports/ artifacts for details and remediate before shipping."
+                    if [ "\${HAS_FINDINGS}" -eq 1 ]; then
+                        echo ""
+                        echo "--- CVE Details (pipeline may still proceed if within thresholds) ---"
+                        for DETAIL in trivy-reports/detail-*.txt; do
+                            [ -f "\${DETAIL}" ] || continue
+                            cat "\${DETAIL}"
+                            echo ""
+                        done
+                    fi
+
+                    if [ "\${TOTAL_CRITICAL}" -gt "${params.MAX_CRITICAL}" ] || \\
+                       [ "\${TOTAL_HIGH}"     -gt "${params.MAX_HIGH}" ]; then
+                        echo ""
+                        echo "CVE GATE FAILED — CRITICAL=\${TOTAL_CRITICAL} (max ${params.MAX_CRITICAL})  HIGH=\${TOTAL_HIGH} (max ${params.MAX_HIGH})"
+                        echo "Publish blocked. Raise MAX_CRITICAL / MAX_HIGH in Build Parameters to allow, or fix the CVEs."
                         exit 1
                     fi
 
-                    echo "GATE PASSED: no CRITICAL or HIGH CVEs found."
-                '''
+                    echo ""
+                    if [ "\${HAS_FINDINGS}" -eq 0 ]; then
+                        echo "CVE gate passed — no findings. Proceeding to publish."
+                    else
+                        echo "CVE gate passed — findings are within configured thresholds. Proceeding to publish."
+                    fi
+                """
             }
         }
 
         // =====================================================================
-        // STAGE 6 — Publish Lambda zips to S3, Docker images to ECR, manifest
+        // STAGE 7 — Publish Lambda zips to S3, Docker images to ECR, manifest
         // =====================================================================
         stage('Publish to S3 & ECR') {
             steps {
@@ -529,7 +565,7 @@ PYEOF
         }
 
         // =====================================================================
-        // STAGE 7 — Cache stats
+        // STAGE 9 — Cache stats
         // =====================================================================
         stage('Cache Stats') {
             steps {
