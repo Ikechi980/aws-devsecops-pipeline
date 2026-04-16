@@ -1,0 +1,28 @@
+[
+  {
+    "name": "headend-gateway",
+    "image": "${ecs_container_image}",
+    "essential": true,
+    "stopTimeout": 60,
+    "portMappings": [
+      {
+        "containerPort": 3000,
+        "protocol": "tcp"
+      }
+    ],
+    "secrets": [
+      { "name": "HOST", "valueFrom": "/ensure-cloud/headend-gateway/HOST" },
+      { "name": "PORT", "valueFrom": "/ensure-cloud/headend-gateway/PORT" },
+      { "name": "HEADEND_SNS_TOPIC_ARN", "valueFrom": "/ensure-cloud/headend-gateway/HEADEND_SNS_TOPIC_ARN" },
+      { "name": "RUST_LOG", "valueFrom": "/ensure-cloud/headend-gateway/RUST_LOG" }
+    ],
+    "logConfiguration": {
+      "logDriver": "awslogs",
+      "options": {
+        "awslogs-group": "${ecs_log_group}",
+        "awslogs-region": "us-east-1",
+        "awslogs-stream-prefix": "ecs"
+      }
+    }
+  }
+]

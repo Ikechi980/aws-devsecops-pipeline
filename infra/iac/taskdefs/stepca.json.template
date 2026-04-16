@@ -1,0 +1,29 @@
+[
+  {
+    "name": "stepca",
+    "image": "${ecs_container_image}",
+    "essential": true,
+    "stopTimeout": 60,
+    "mountPoints": [
+      {
+        "sourceVolume": "stepca-efs",
+        "containerPath": "/home/step",
+        "readOnly": false
+      }
+    ],
+    "portMappings": [
+      {
+        "containerPort": 9000,
+        "protocol": "tcp"
+      }
+    ],
+    "logConfiguration": {
+      "logDriver": "awslogs",
+      "options": {
+        "awslogs-group": "${ecs_log_group}",
+        "awslogs-region": "us-east-1",
+        "awslogs-stream-prefix": "ecs"
+      }
+    }
+  }
+]

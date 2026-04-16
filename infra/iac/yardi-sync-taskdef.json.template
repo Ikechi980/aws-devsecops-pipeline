@@ -1,0 +1,27 @@
+[
+  {
+    "name": "yardi-sync",
+    "image": "${ecs_container_image}",
+    "essential": true,
+    "stopTimeout": 60,
+    "command": [],
+    "environment": [],
+    "secrets": [
+      { "name": "RESOURCES_API_BASE_URL", "valueFrom": "/sentrics-core/yardi-sync/RESOURCES_API_BASE_URL" },
+      { "name": "YARDI_POLL_INTERVAL_MS", "valueFrom": "/sentrics-core/yardi-sync/YARDI_POLL_INTERVAL_MS" },
+      { "name": "RESOURCES_REFRESH_INTERVAL_SECS", "valueFrom": "/sentrics-core/yardi-sync/RESOURCES_REFRESH_INTERVAL_SECS" },
+      { "name": "RESOURCES_EVENTS_QUEUE_URL", "valueFrom": "/sentrics-core/yardi-sync/RESOURCES_EVENTS_QUEUE_URL" },
+      { "name": "FAILURE_SNS_TOPIC_ARN", "valueFrom": "/sentrics-core/yardi-sync/FAILURE_SNS_TOPIC_ARN" },
+      { "name": "AWS_REGION", "valueFrom": "/sentrics-core/yardi-sync/AWS_REGION" },
+      { "name": "RUST_LOG", "valueFrom": "/sentrics-core/yardi-sync/RUST_LOG" }
+    ],
+    "logConfiguration": {
+      "logDriver": "awslogs",
+      "options": {
+        "awslogs-group": "/ecs/yardi-sync",
+        "awslogs-region": "us-east-1",
+        "awslogs-stream-prefix": "yardi-sync"
+      }
+    }
+  }
+]

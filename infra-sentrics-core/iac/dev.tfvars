@@ -103,24 +103,3 @@ ecs_task_role_arn = "arn:aws:iam::892234674906:role/ecs-prod-ecs-execution-role"
 ecs_services  = ["yardi-sync"]
 log_retention = 30
 
-# CodePipeline values
-pipeline_name                    = "Dev-Sentrics-Core-Master-Pipeline"
-artifact_bucket_name             = "sentrics-ensure-terraform-state-codepipeline-cache"
-github_owner                     = "SilversphereInc"
-github_repo                      = "sentrics-core"
-github_branch                    = "development"
-infra_github_owner               = "SilversphereInc"
-infra_github_repo                = "infra-sentrics-core"
-infra_github_branch              = "development"
-infra_source_detect_changes      = false
-codepipeline_role_arn            = "arn:aws:iam::892234674906:role/service-role/AWSCodePipelineServiceRole-us-east-1-Dev-Sentrics-Master-Orches"
-codestar_connection_arn          = "arn:aws:codeconnections:us-east-1:892234674906:connection/ad45d8bb-a719-485b-8b0e-d51fe798dabb"
-yardi_image_build_project        = "Sentrics-core-yardi-build-image-pipeline-v1"
-lambda_zip_build_project         = "Sentrics-core-lambdas-zip-compile-Pipeline"
-infra_build_project              = "Dev-Sentrics-core-infra-pipeline"
-yardi_image_repo_name            = "sentrics-core-yardi-sync-repo"
-enable_infra_manual_approval     = false
-manual_approval_notification_arn = ""
-security_scan_project            = "sentrics-core-security-scan-pipeline-v1"
-enable_build_stage               = true
-enable_security_stage            = true

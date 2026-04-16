@@ -62,27 +62,6 @@ change_logger_lambda_s3_bucket = "sentrics-ensure-lambda-artifacts-truststore"
 change_logger_lambda_s3_key    = "prod/lambda-artifacts/resources-change-logger/resources-change-logger-<RELEASE_SHA>.zip"
 change_logger_iam_policy_name  = "resources-change-logger-access"
 
-# CodePipeline values
+# ECS image
 ecs_task_definition_file = "yardi-sync-taskdef.json.template"
 ecs_container_image      = "892234674906.dkr.ecr.us-east-1.amazonaws.com/prod-sentrics-core-yardi-sync-repo:<RELEASE_SHA>"
-
-pipeline_name                    = "Prod-Sentrics-Core-Master-Pipeline"
-artifact_bucket_name             = "sentrics-ensure-terraform-state-codepipeline-cache"
-github_owner                     = "SilversphereInc"
-github_repo                      = "sentrics-core"
-github_branch                    = "development"
-infra_github_owner               = "SilversphereInc"
-infra_github_repo                = "infra-sentrics-core"
-infra_github_branch              = "development"
-infra_source_detect_changes      = false
-codepipeline_role_arn            = "arn:aws:iam::892234674906:role/service-role/AWSCodePipelineServiceRole-us-east-1-Dev-Sentrics-Master-Orches"
-codestar_connection_arn          = "arn:aws:codeconnections:us-east-1:892234674906:connection/ad45d8bb-a719-485b-8b0e-d51fe798dabb"
-yardi_image_build_project        = "Prod-Sentrics-core-yardi-build-image-pipeline-v1"
-lambda_zip_build_project         = "Prod-Sentrics-core-lambdas-zip-compile-Pipeline"
-infra_build_project              = "Prod-Sentrics-core-infra-pipeline"
-yardi_image_repo_name            = "prod-sentrics-core-yardi-sync-repo"
-enable_infra_manual_approval     = true
-manual_approval_notification_arn = ""
-security_scan_project            = "sentrics-core-security-scan-pipeline-v1"
-enable_build_stage               = false
-enable_security_stage            = true
