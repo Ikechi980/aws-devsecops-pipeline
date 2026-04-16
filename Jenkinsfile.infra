@@ -75,6 +75,11 @@ pipeline {
             defaultValue: '',
             description: 'Optional Terraform log level (TRACE|DEBUG|INFO|WARN|ERROR). Leave blank for none.'
         )
+        booleanParam(
+            name: 'TF_SKIP_REFRESH',
+            defaultValue: true,
+            description: 'Skip live AWS state refresh during plan (-refresh=false). Faster plans; safe for CI/CD since state file is trusted. Uncheck only when you suspect manual out-of-band changes in AWS.'
+        )
     }
 
     environment {
@@ -386,6 +391,7 @@ def tfPlan(String tfDir, String stackName, String extraFlags = '') {
             echo "=== [${stackName}] terraform ${planLabel} ==="
             terraform plan \\
                 ${extraFlags} \\
+                ${params.TF_SKIP_REFRESH ? '-refresh=false' : ''} \\
                 -parallelism=30 \\
                 -var-file="\${VARS_WORK}" \\
                 -out=plan.tfplan \\
