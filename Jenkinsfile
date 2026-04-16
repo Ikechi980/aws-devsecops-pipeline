@@ -153,6 +153,43 @@ pipeline {
                     set -euo pipefail
                     export PATH="${CARGO_HOME}/bin:/usr/local/bin:${PATH}"
 
+                    ensure_cache_dir() {
+                        local dir="$1"
+                        if ! mkdir -p "${dir}" 2>/dev/null; then
+                            cat <<EOF
+ERROR: unable to create required cache directory: ${dir}
+
+Run this once on the Jenkins agent as an administrator:
+  sudo mkdir -p /var/cache/jenkins/rustup
+  sudo mkdir -p /var/cache/jenkins/cargo
+  sudo mkdir -p /var/cache/jenkins/cargo-target-ensure-cloud
+  sudo mkdir -p /var/cache/jenkins/cargo-target-sentrics-core
+  sudo chown -R jenkins:jenkins /var/cache/jenkins
+EOF
+                            exit 1
+                        fi
+
+                        if [ ! -w "${dir}" ]; then
+                            cat <<EOF
+ERROR: cache directory is not writable: ${dir}
+
+Run this once on the Jenkins agent as an administrator:
+  sudo mkdir -p /var/cache/jenkins/rustup
+  sudo mkdir -p /var/cache/jenkins/cargo
+  sudo mkdir -p /var/cache/jenkins/cargo-target-ensure-cloud
+  sudo mkdir -p /var/cache/jenkins/cargo-target-sentrics-core
+  sudo chown -R jenkins:jenkins /var/cache/jenkins
+EOF
+                            exit 1
+                        fi
+                    }
+
+                    echo "=== Verifying cache directories ==="
+                    ensure_cache_dir "${RUSTUP_HOME}"
+                    ensure_cache_dir "${CARGO_HOME}"
+                    ensure_cache_dir "${CARGO_TARGET_DIR_ENSURE}"
+                    ensure_cache_dir "${CARGO_TARGET_DIR_SENTRICS}"
+
                     require_tool() {
                         local tool="$1"
                         command -v "${tool}" >/dev/null 2>&1 || {
@@ -606,19 +643,11 @@ pipeline {
                         process_image_artifact "yardi-sync" "yardi-sync:${GIT_COMMIT}"
                     fi
 
-                    echo "=== Security Scan Findings Summary ==="
-                    if command -v column >/dev/null 2>&1; then
-                        column -t -s $'\t' "${SUMMARY_FILE}"
-                    else
-                        cat "${SUMMARY_FILE}"
-                    fi
-
                     if [ -n "${FAILED_DEPLOYABLES}" ]; then
-                        echo "FAILED_DEPLOYABLES=${FAILED_DEPLOYABLES}"
-                        exit 1
+                        echo "BLOCKED_DEPLOYABLES=${FAILED_DEPLOYABLES} — details will be reported in CVE Gate."
+                    else
+                        echo "All deployables passed security scan and are eligible for publish."
                     fi
-
-                    echo "All deployables passed security scan and are eligible for publish."
                 '''
             }
         }
@@ -652,6 +681,7 @@ pipeline {
         stage('CVE Gate') {
             steps {
                 sh '''#!/usr/bin/env bash
+                    set -euo pipefail
                     SUMMARY_FILE="trivy-reports/security-scan-summary.tsv"
                     [ -f "${SUMMARY_FILE}" ] || { echo "ERROR: Missing ${SUMMARY_FILE}"; exit 1; }
 
@@ -663,22 +693,44 @@ pipeline {
                         cat "${SUMMARY_FILE}"
                     fi
 
+                    # Print CVE details + fix information for every deployable with findings
                     HAS_DETAIL=0
                     for DETAIL in trivy-reports/detail-*.txt; do
                         [ -f "${DETAIL}" ] || continue
+                        [ -s "${DETAIL}" ]  || continue
                         if [ "${HAS_DETAIL}" -eq 0 ]; then
                             echo ""
-                            echo "Vulnerability details for deployables with CRITICAL/HIGH findings:"
+                            echo "=== CVE Details & Available Fixes ==="
                             HAS_DETAIL=1
                         fi
-                        echo "--- ${DETAIL} ---"
+                        # Derive a clean label from the filename (detail-image-stepca.txt → image/stepca)
+                        LABEL="${DETAIL#trivy-reports/detail-}"
+                        LABEL="${LABEL%.txt}"
+                        LABEL="${LABEL/-//}"
+                        echo ""
+                        echo "--- ${LABEL} ---"
+                        # Header
+                        printf '  %-10s %-20s %-30s %-18s %-18s %s\n' \
+                            "SEVERITY" "CVE" "PACKAGE" "INSTALLED" "FIXED" "TITLE"
                         cat "${DETAIL}"
                         echo ""
                     done
 
                     if [ "${HAS_DETAIL}" -eq 0 ]; then
-                        echo "No CRITICAL/HIGH vulnerability detail files were generated."
+                        echo "No CRITICAL/HIGH findings."
                     fi
+
+                    # Fail here if any deployable was marked BLOCKED by the scan
+                    BLOCKED=$(awk -F'\t' 'NR > 1 && $5 == "BLOCKED" { printf "%s ", $2 }' "${SUMMARY_FILE}")
+                    if [ -n "${BLOCKED}" ]; then
+                        echo ""
+                        echo "CVE GATE FAILED — blocked deployables: ${BLOCKED}"
+                        echo "Fix the vulnerabilities or raise the thresholds in Build Parameters, then re-run."
+                        exit 1
+                    fi
+
+                    echo ""
+                    echo "CVE gate passed — all deployables cleared for publish."
                 '''
             }
         }
