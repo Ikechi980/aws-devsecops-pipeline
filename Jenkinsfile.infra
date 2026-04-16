@@ -1,6 +1,12 @@
 pipeline {
     agent any
 
+    options {
+        buildDiscarder(logRotator(numToKeepStr: '20'))
+        timeout(time: 60, unit: 'MINUTES')
+        disableConcurrentBuilds()
+    }
+
     parameters {
         choice(
             name: 'STACK',
@@ -12,6 +18,16 @@ pipeline {
             choices: ['dev', 'prod'],
             description: 'Target environment'
         )
+        choice(
+            name: 'ACTION',
+            choices: ['plan', 'apply', 'destroy'],
+            description: 'plan = show changes | apply = plan + gate + apply | destroy = plan destroy + gate + destroy'
+        )
+        string(
+            name: 'RELEASE_SHA',
+            defaultValue: '',
+            description: 'Git commit SHA — replaces <RELEASE_SHA> in tfvars. Required for apply.'
+        )
     }
 
     environment {
@@ -21,41 +37,180 @@ pipeline {
 
     stages {
 
-        stage('sentrics-core') {
-            when {
-                expression { return params.STACK in ['both', 'sentrics-core'] }
-            }
+        stage('Validate') {
             steps {
-                script { tfListAndPlan(env.SC_TF_DIR, 'sentrics-core') }
+                script {
+                    if (params.ACTION == 'apply' && !params.RELEASE_SHA?.trim()) {
+                        error("RELEASE_SHA is required when ACTION=apply")
+                    }
+                }
+                echo "Stack       : ${params.STACK}"
+                echo "Environment : ${params.ENVIRONMENT}"
+                echo "Action      : ${params.ACTION}"
+                echo "Release SHA : ${params.RELEASE_SHA ?: '(none)'}"
             }
         }
 
-        stage('ensure-cloud') {
+        stage('Plan: sentrics-core') {
             when {
-                expression { return params.STACK in ['both', 'ensure-cloud'] }
+                allOf {
+                    expression { return params.ACTION in ['plan', 'apply'] }
+                    expression { return params.STACK in ['both', 'sentrics-core'] }
+                }
             }
             steps {
-                script { tfListAndPlan(env.EC_TF_DIR, 'ensure-cloud') }
+                script { tfPlan(env.SC_TF_DIR, 'sentrics-core') }
+            }
+        }
+
+        stage('Plan: ensure-cloud') {
+            when {
+                allOf {
+                    expression { return params.ACTION in ['plan', 'apply'] }
+                    expression { return params.STACK in ['both', 'ensure-cloud'] }
+                }
+            }
+            steps {
+                script { tfPlan(env.EC_TF_DIR, 'ensure-cloud') }
+            }
+        }
+
+        stage('Approve Apply') {
+            when {
+                expression { return params.ACTION == 'apply' }
+            }
+            steps {
+                input(
+                    message: "Apply Terraform changes?\n\nStack: ${params.STACK}\nEnvironment: ${params.ENVIRONMENT}",
+                    ok: 'Yes, apply'
+                )
+            }
+        }
+
+        stage('Apply: sentrics-core') {
+            when {
+                allOf {
+                    expression { return params.ACTION == 'apply' }
+                    expression { return params.STACK in ['both', 'sentrics-core'] }
+                }
+            }
+            steps {
+                script { tfApply(env.SC_TF_DIR, 'sentrics-core') }
+            }
+        }
+
+        stage('Apply: ensure-cloud') {
+            when {
+                allOf {
+                    expression { return params.ACTION == 'apply' }
+                    expression { return params.STACK in ['both', 'ensure-cloud'] }
+                }
+            }
+            steps {
+                script { tfApply(env.EC_TF_DIR, 'ensure-cloud') }
+            }
+        }
+
+        stage('Plan Destroy: ensure-cloud') {
+            when {
+                allOf {
+                    expression { return params.ACTION == 'destroy' }
+                    expression { return params.STACK in ['both', 'ensure-cloud'] }
+                }
+            }
+            steps {
+                script { tfPlan(env.EC_TF_DIR, 'ensure-cloud', '-destroy') }
+            }
+        }
+
+        stage('Plan Destroy: sentrics-core') {
+            when {
+                allOf {
+                    expression { return params.ACTION == 'destroy' }
+                    expression { return params.STACK in ['both', 'sentrics-core'] }
+                }
+            }
+            steps {
+                script { tfPlan(env.SC_TF_DIR, 'sentrics-core', '-destroy') }
+            }
+        }
+
+        stage('Approve Destroy') {
+            when {
+                expression { return params.ACTION == 'destroy' }
+            }
+            steps {
+                input(
+                    message: "DESTROY Terraform resources?\n\nStack: ${params.STACK}\nEnvironment: ${params.ENVIRONMENT}\n\nThis will permanently delete infrastructure.",
+                    ok: 'Yes, destroy'
+                )
+            }
+        }
+
+        stage('Destroy: ensure-cloud') {
+            when {
+                allOf {
+                    expression { return params.ACTION == 'destroy' }
+                    expression { return params.STACK in ['both', 'ensure-cloud'] }
+                }
+            }
+            steps {
+                script { tfApply(env.EC_TF_DIR, 'ensure-cloud') }
+            }
+        }
+
+        stage('Destroy: sentrics-core') {
+            when {
+                allOf {
+                    expression { return params.ACTION == 'destroy' }
+                    expression { return params.STACK in ['both', 'sentrics-core'] }
+                }
+            }
+            steps {
+                script { tfApply(env.SC_TF_DIR, 'sentrics-core') }
             }
         }
 
     }
 }
 
-def tfListAndPlan(String tfDir, String stackName) {
+def tfPlan(String tfDir, String stackName, String extraFlags = '') {
     withCredentials([usernamePassword(credentialsId: 'github-pat', usernameVariable: 'GIT_USER', passwordVariable: 'GITHUB_PAT')]) {
         dir(tfDir) {
             sh """
                 git config --global url."https://\${GITHUB_PAT}@github.com/".insteadOf "https://github.com/"
 
+                VARS_SRC="${params.ENVIRONMENT}.tfvars"
+                VARS_WORK="${params.ENVIRONMENT}.tfvars.work"
+                cp "\${VARS_SRC}" "\${VARS_WORK}"
+                SHA="${params.RELEASE_SHA?.trim() ?: 'UNKNOWN'}"
+                sed -i "s|<RELEASE_SHA>|\${SHA}|g" "\${VARS_WORK}"
+
                 echo "=== [${stackName}] terraform init ==="
                 terraform init -backend-config="${params.ENVIRONMENT}-backend.tfvars" -input=false
 
-                echo "=== [${stackName}] terraform state list ==="
-                terraform state list
-
                 echo "=== [${stackName}] terraform plan ==="
-                terraform plan -refresh=false -var-file="${params.ENVIRONMENT}.tfvars" -input=false
+                terraform plan \
+                    ${extraFlags} \
+                    -refresh=false \
+                    -var-file="\${VARS_WORK}" \
+                    -out=plan.tfplan \
+                    -input=false
+
+                rm -f "\${VARS_WORK}"
+            """
+        }
+    }
+}
+
+def tfApply(String tfDir, String stackName) {
+    withCredentials([usernamePassword(credentialsId: 'github-pat', usernameVariable: 'GIT_USER', passwordVariable: 'GITHUB_PAT')]) {
+        dir(tfDir) {
+            sh """
+                git config --global url."https://\${GITHUB_PAT}@github.com/".insteadOf "https://github.com/"
+
+                echo "=== [${stackName}] terraform apply ==="
+                terraform apply -input=false -auto-approve plan.tfplan
             """
         }
     }
