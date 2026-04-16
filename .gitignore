@@ -1,0 +1,8 @@
+# Terraform
+**/.terraform/
+**/*.tfplan
+**/*.tfstate
+**/*.tfstate.backup
+**/plan.txt
+**/plan.tfplan
+**/*.tfvars.work
