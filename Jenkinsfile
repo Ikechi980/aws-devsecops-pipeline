@@ -56,6 +56,31 @@ pipeline {
             defaultValue: '0',
             description: 'Max HIGH CVEs allowed across all artifacts — publish is blocked if total exceeds this'
         )
+        string(
+            name: 'STEPCA_MAX_CRITICAL',
+            defaultValue: '2',
+            description: 'Max CRITICAL CVEs allowed for the stepca image'
+        )
+        string(
+            name: 'STEPCA_MAX_HIGH',
+            defaultValue: '0',
+            description: 'Max HIGH CVEs allowed for the stepca image'
+        )
+        booleanParam(
+            name: 'ENFORCE_VULN_THRESHOLDS',
+            defaultValue: true,
+            description: 'Fail the pipeline when a deployable exceeds its vulnerability threshold'
+        )
+        string(
+            name: 'AWS_REGION',
+            defaultValue: 'us-east-1',
+            description: 'AWS region for artifact and image publication'
+        )
+        string(
+            name: 'AWS_ACCOUNT_ID',
+            defaultValue: '',
+            description: 'Optional AWS account override. Leave blank to resolve from the active AWS credentials.'
+        )
     }
 
     // -------------------------------------------------------------------------
@@ -76,51 +101,120 @@ pipeline {
 
         SQLX_OFFLINE = 'true'
 
-        AWS_REGION      = 'us-east-1'
-        AWS_ACCOUNT_ID  = '892234674906'
-        ECR_REGISTRY    = '892234674906.dkr.ecr.us-east-1.amazonaws.com'
         ARTIFACT_BUCKET = 'sentrics-ensure-lambda-artifacts-truststore'
     }
 
     stages {
 
         // =====================================================================
-        // STAGE 1 — Toolchain version gate
+        // STAGE 1 — Resolve AWS publication target
+        // Region is parameter-driven; account defaults to the active AWS caller.
+        // =====================================================================
+        stage('Resolve AWS Context') {
+            steps {
+                script {
+                    env.AWS_REGION = params.AWS_REGION?.trim()
+                    if (!env.AWS_REGION) {
+                        error('AWS_REGION is required')
+                    }
+
+                    def accountOverride = params.AWS_ACCOUNT_ID?.trim()
+                    if (accountOverride) {
+                        if (!(accountOverride ==~ /\d{12}/)) {
+                            error("AWS_ACCOUNT_ID must be a 12-digit AWS account ID: '${accountOverride}'")
+                        }
+                        env.AWS_ACCOUNT_ID = accountOverride
+                    } else {
+                        env.AWS_ACCOUNT_ID = sh(
+                            script: 'aws sts get-caller-identity --query Account --output text',
+                            returnStdout: true
+                        ).trim()
+                        if (!(env.AWS_ACCOUNT_ID ==~ /\d{12}/)) {
+                            error("Unable to resolve a valid AWS account ID from the active AWS credentials: '${env.AWS_ACCOUNT_ID}'")
+                        }
+                    }
+
+                    env.ECR_REGISTRY = "${env.AWS_ACCOUNT_ID}.dkr.ecr.${env.AWS_REGION}.amazonaws.com"
+
+                    echo "AWS region      : ${env.AWS_REGION}"
+                    echo "AWS account     : ${env.AWS_ACCOUNT_ID}"
+                    echo "ECR registry    : ${env.ECR_REGISTRY}"
+                    echo "Artifact bucket : ${env.ARTIFACT_BUCKET}"
+                }
+            }
+        }
+
+        // =====================================================================
+        // STAGE 1 — Toolchain and prerequisite validation
         // =====================================================================
         stage('Verify Toolchain') {
             steps {
-                dir('ensure-cloud') {
-                    sh '''
-                        export PATH="${CARGO_HOME}/bin:/usr/local/bin:${PATH}"
+                sh '''#!/usr/bin/env bash
+                    set -euo pipefail
+                    export PATH="${CARGO_HOME}/bin:/usr/local/bin:${PATH}"
 
-                        RUST_VERSION="$(bash ./scripts/ci/rust-version.sh)"
-                        CARGO_LAMBDA_VERSION="$(bash ./scripts/ci/cargo-lambda-version.sh)"
+                    require_tool() {
+                        local tool="$1"
+                        command -v "${tool}" >/dev/null 2>&1 || {
+                            echo "ERROR: required tool not found: ${tool}"
+                            exit 1
+                        }
+                    }
 
-                        echo "=== Installing / verifying Rust ${RUST_VERSION} ==="
-                        rustup toolchain install "${RUST_VERSION}" \
+                    echo "=== Verifying required tools ==="
+                    for tool in bash docker jq python3 trivy aws unzip gzip rustup cargo; do
+                        require_tool "${tool}"
+                    done
+
+                    bash --version | head -n1
+                    docker --version
+                    jq --version
+                    python3 --version
+                    trivy --version
+                    aws --version
+                    unzip -v | head -n1
+                    gzip --version | head -n1
+
+                    verify_rust_repo() {
+                        local repo="$1"
+                        local rust_version
+                        local cargo_lambda_version
+
+                        rust_version="$(bash "./${repo}/scripts/ci/rust-version.sh")"
+                        cargo_lambda_version="$(bash "./${repo}/scripts/ci/cargo-lambda-version.sh")"
+
+                        echo "=== Installing / verifying Rust ${rust_version} for ${repo} ==="
+                        rustup toolchain install "${rust_version}" \
                             --profile minimal \
                             --component rustfmt \
                             --component clippy
-                        rustup override set "${RUST_VERSION}"
+                        (
+                            cd "./${repo}"
+                            rustup override set "${rust_version}"
+                            rustc --version | grep -q " ${rust_version} " || {
+                                echo "ERROR: rustc version mismatch for ${repo} (expected ${rust_version})"
+                                exit 1
+                            }
+                            cargo --version | grep -q " ${rust_version} " || {
+                                echo "ERROR: cargo version mismatch for ${repo} (expected ${rust_version})"
+                                exit 1
+                            }
+                        )
 
-                        rustc --version | grep -q " ${RUST_VERSION} " || {
-                            echo "ERROR: rustc version mismatch (expected ${RUST_VERSION})"
-                            exit 1
-                        }
-                        cargo --version | grep -q " ${RUST_VERSION} " || {
-                            echo "ERROR: cargo version mismatch (expected ${RUST_VERSION})"
-                            exit 1
-                        }
-
-                        echo "=== Installing / verifying cargo-lambda ${CARGO_LAMBDA_VERSION} ==="
-                        if ! cargo lambda --version 2>/dev/null | grep -q " ${CARGO_LAMBDA_VERSION} "; then
-                            cargo install cargo-lambda --locked --version "${CARGO_LAMBDA_VERSION}"
+                        echo "=== Installing / verifying cargo-lambda ${cargo_lambda_version} for ${repo} ==="
+                        if ! cargo lambda --version 2>/dev/null | grep -q " ${cargo_lambda_version} "; then
+                            cargo install cargo-lambda --locked --version "${cargo_lambda_version}"
                         fi
+                    }
 
-                        echo "=== Toolchain OK ==="
-                        rustc --version && cargo --version && cargo lambda --version
-                    '''
-                }
+                    verify_rust_repo ensure-cloud
+                    verify_rust_repo sentrics-core
+
+                    echo "=== Toolchain OK ==="
+                    rustc --version
+                    cargo --version
+                    cargo lambda --version
+                '''
             }
         }
 
@@ -265,133 +359,267 @@ pipeline {
 
         // =====================================================================
         // STAGE 4 — Trivy scan
-        // Each parallel branch scans its artifacts, writes a human-readable
-        // table report AND a CSV summary (artifact,critical,high).
-        // Both branches always exit 0 — the CVE gate runs after archiving.
+        // Matches the security buildspec model:
+        //   • fail on missing artifacts or Trivy scan errors
+        //   • count severities from JSON with jq
+        //   • record per-deployable status and notes in one summary file
         // =====================================================================
         stage('Trivy Scan') {
-            parallel {
+            steps {
+                sh '''#!/usr/bin/env bash
+                    set -euo pipefail
 
-                stage('Scan Lambda Zips') {
-                    steps {
-                        sh '''
-                            mkdir -p trivy-reports
-                            REPORT="trivy-reports/trivy-lambda-scan.txt"
-                            SUMMARY="trivy-reports/lambda-cve-summary.csv"
-                            : > "${REPORT}"
-                            echo "type,path,name,critical,high" > "${SUMMARY}"
+                    mkdir -p trivy-reports
+                    SUMMARY_FILE="trivy-reports/security-scan-summary.tsv"
+                    LAMBDA_REPORT="trivy-reports/trivy-lambda-scan.txt"
+                    DOCKER_REPORT="trivy-reports/trivy-docker-scan.txt"
+                    : > "${LAMBDA_REPORT}"
+                    : > "${DOCKER_REPORT}"
+                    printf 'TYPE\tDEPLOYABLE\tCRITICAL\tHIGH\tSTATUS\tNOTE\n' > "${SUMMARY_FILE}"
 
-                            for ENTRY in \
-                                "ensure-cloud/out/headend-api.zip:headend-api" \
-                                "ensure-cloud/out/core-change-publisher.zip:core-change-publisher" \
-                                "sentrics-core/out/resources-api.zip:resources-api" \
-                                "sentrics-core/out/migrate.zip:migrate" \
-                                "sentrics-core/out/resources-change-logger.zip:resources-change-logger"
-                            do
-                                ZIP="${ENTRY%%:*}"
-                                NAME="${ENTRY##*:}"
-                                echo "===== ${ZIP} =====" | tee -a "${REPORT}"
+                    FAILED_DEPLOYABLES=""
 
-                                # JSON scan — count CRITICAL/HIGH per artifact
-                                trivy fs \
-                                    --severity "${TRIVY_SEVERITY}" \
-                                    --exit-code 0 \
-                                    --no-progress \
-                                    --format json \
-                                    "${ZIP}" > trivy-reports/tmp-scan.json 2>/dev/null || true
-
-                                COUNTS=$(python3 - <<'PYEOF'
-import json
-try:
-    d = json.load(open("trivy-reports/tmp-scan.json"))
-    c = sum(1 for r in d.get("Results", []) for v in (r.get("Vulnerabilities") or []) if v.get("Severity") == "CRITICAL")
-    h = sum(1 for r in d.get("Results", []) for v in (r.get("Vulnerabilities") or []) if v.get("Severity") == "HIGH")
-    print(c, h)
-except Exception:
-    print("0 0")
-PYEOF
-)
-                                CRITICAL=$(echo "${COUNTS}" | awk '{print $1}')
-                                HIGH=$(echo "${COUNTS}" | awk '{print $2}')
-                                echo "lambda,${ZIP},${NAME},${CRITICAL},${HIGH}" >> "${SUMMARY}"
-
-                                # Table scan — human-readable detail, captured once
-                                TABLE=$(trivy fs \
-                                    --severity "${TRIVY_SEVERITY}" \
-                                    --exit-code 0 \
-                                    --no-progress \
-                                    --format table \
-                                    "${ZIP}" 2>&1)
-                                printf '%s\n\n' "${TABLE}" >> "${REPORT}"
-
-                                # Per-artifact detail file (used by summary stage)
-                                if [ "${CRITICAL}" -gt 0 ] || [ "${HIGH}" -gt 0 ]; then
-                                    printf '%s\n' "${TABLE}" > "trivy-reports/detail-lambda-${NAME}.txt"
-                                fi
-                            done
-
-                            rm -f trivy-reports/tmp-scan.json
-                            echo "=== Lambda scan complete ==="
-                        '''
+                    add_failure() {
+                        local deployable="$1"
+                        if [ -z "${FAILED_DEPLOYABLES}" ]; then
+                            FAILED_DEPLOYABLES="${deployable}"
+                        else
+                            FAILED_DEPLOYABLES="${FAILED_DEPLOYABLES},${deployable}"
+                        fi
                     }
-                }
 
-                stage('Scan Docker Images') {
-                    when {
-                        expression { return !params.SKIP_DOCKER_BUILDS }
+                    add_summary() {
+                        local type="$1"
+                        local deployable="$2"
+                        local critical="$3"
+                        local high="$4"
+                        local status="$5"
+                        local note="$6"
+                        printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+                            "${type}" "${deployable}" "${critical}" "${high}" "${status}" "${note}" >> "${SUMMARY_FILE}"
                     }
-                    steps {
-                        sh '''
-                            mkdir -p trivy-reports
-                            REPORT="trivy-reports/trivy-docker-scan.txt"
-                            SUMMARY="trivy-reports/docker-cve-summary.csv"
-                            : > "${REPORT}"
-                            echo "type,path,name,critical,high" > "${SUMMARY}"
 
-                            for NAME in headend-gateway pki-api stepca yardi-sync; do
-                                IMAGE="${NAME}:${GIT_COMMIT}"
-                                echo "===== ${IMAGE} =====" | tee -a "${REPORT}"
-
-                                trivy image \
-                                    --severity "${TRIVY_SEVERITY}" \
-                                    --exit-code 0 \
-                                    --no-progress \
-                                    --format json \
-                                    "${IMAGE}" > trivy-reports/tmp-scan.json 2>/dev/null || true
-
-                                COUNTS=$(python3 - <<'PYEOF'
-import json
-try:
-    d = json.load(open("trivy-reports/tmp-scan.json"))
-    c = sum(1 for r in d.get("Results", []) for v in (r.get("Vulnerabilities") or []) if v.get("Severity") == "CRITICAL")
-    h = sum(1 for r in d.get("Results", []) for v in (r.get("Vulnerabilities") or []) if v.get("Severity") == "HIGH")
-    print(c, h)
-except Exception:
-    print("0 0")
-PYEOF
-)
-                                CRITICAL=$(echo "${COUNTS}" | awk '{print $1}')
-                                HIGH=$(echo "${COUNTS}" | awk '{print $2}')
-                                echo "image,${IMAGE},${NAME},${CRITICAL},${HIGH}" >> "${SUMMARY}"
-
-                                TABLE=$(trivy image \
-                                    --severity "${TRIVY_SEVERITY}" \
-                                    --exit-code 0 \
-                                    --no-progress \
-                                    --format table \
-                                    "${IMAGE}" 2>&1)
-                                printf '%s\n\n' "${TABLE}" >> "${REPORT}"
-
-                                if [ "${CRITICAL}" -gt 0 ] || [ "${HIGH}" -gt 0 ]; then
-                                    printf '%s\n' "${TABLE}" > "trivy-reports/detail-image-${NAME}.txt"
-                                fi
-                            done
-
-                            rm -f trivy-reports/tmp-scan.json
-                            echo "=== Docker scan complete ==="
-                        '''
+                    count_severity() {
+                        local report_file="$1"
+                        local sev="$2"
+                        jq --arg sev "$sev" '[.. | objects | select(has("Severity")) | .Severity | select(. == $sev)] | length' "${report_file}"
                     }
-                }
+
+                    case ",${TRIVY_SEVERITY}," in
+                        *,HIGH,*|*,CRITICAL,*)
+                            ;;
+                        *)
+                            echo "ERROR: TRIVY_SEVERITY must include HIGH and/or CRITICAL for this gate. Got '${TRIVY_SEVERITY}'"
+                            exit 1
+                            ;;
+                    esac
+
+                    resolve_image_thresholds() {
+                        local deployable="$1"
+                        local max_critical="${MAX_CRITICAL}"
+                        local max_high="${MAX_HIGH}"
+                        case "${deployable}" in
+                            stepca)
+                                max_critical="${STEPCA_MAX_CRITICAL:-${MAX_CRITICAL}}"
+                                max_high="${STEPCA_MAX_HIGH:-${MAX_HIGH}}"
+                                ;;
+                        esac
+                        echo "${max_critical} ${max_high}"
+                    }
+
+                    print_vuln_details() {
+                        local report_file="$1"
+                        local artifact_type="$2"
+                        local deployable="$3"
+                        local critical_count="$4"
+                        local high_count="$5"
+                        local detail_file="trivy-reports/detail-${artifact_type}-${deployable}.txt"
+
+                        rm -f "${detail_file}"
+                        if [ "${critical_count}" -eq 0 ] && [ "${high_count}" -eq 0 ]; then
+                            return
+                        fi
+
+                        jq -r '
+                            [
+                              .Results[]?
+                              | .Vulnerabilities[]?
+                              | select(.Severity == "CRITICAL" or .Severity == "HIGH")
+                              | [
+                                  .Severity,
+                                  .VulnerabilityID,
+                                  (.PkgName // "-"),
+                                  (.InstalledVersion // "-"),
+                                  (.FixedVersion // "-"),
+                                  ((.Title // .Description // "-") | gsub("[\\r\\n\\t]+"; " ") | .[0:140])
+                                ]
+                            ]
+                            | sort_by(.[0], .[1])
+                            | .[]
+                            | @tsv
+                        ' "${report_file}" | while IFS=$'\t' read -r sev vuln_id pkg installed fixed title; do
+                            printf '  - %s %s pkg=%s installed=%s fixed=%s title=%s\n' \
+                                "${sev}" "${vuln_id}" "${pkg}" "${installed}" "${fixed}" "${title}"
+                        done > "${detail_file}"
+                    }
+
+                    process_lambda_bundle() {
+                        local manifest_path="trivy-reports/lambda-manifest.json"
+                        local artifact_dir="trivy-reports/lambda-bundle"
+                        local item
+
+                        mkdir -p "${artifact_dir}"
+                        jq -n '{
+                            artifacts: [
+                                { deployable: "headend-api", file: "headend-api.zip", path: "ensure-cloud/out/headend-api.zip" },
+                                { deployable: "core-change-publisher", file: "core-change-publisher.zip", path: "ensure-cloud/out/core-change-publisher.zip" },
+                                { deployable: "resources-api", file: "resources-api.zip", path: "sentrics-core/out/resources-api.zip" },
+                                { deployable: "migrate", file: "migrate.zip", path: "sentrics-core/out/migrate.zip" },
+                                { deployable: "resources-change-logger", file: "resources-change-logger.zip", path: "sentrics-core/out/resources-change-logger.zip" }
+                            ]
+                        }' > "${manifest_path}"
+
+                        jq -e '.artifacts and (.artifacts | type == "array")' "${manifest_path}" >/dev/null 2>&1 || {
+                            echo "ERROR: Invalid lambda manifest format in ${manifest_path}"
+                            add_summary "lambda" "bundle" "-" "-" "ERROR" "invalid lambda-manifest.json format"
+                            add_failure "lambda-bundle"
+                            return
+                        }
+
+                        while IFS= read -r item; do
+                            local deployable
+                            local zip_path
+                            local extract_dir
+                            local report_file
+                            local critical_count
+                            local high_count
+
+                            deployable="$(echo "${item}" | jq -r '.deployable')"
+                            zip_path="$(echo "${item}" | jq -r '.path')"
+                            extract_dir="${artifact_dir}/unzip-${deployable}"
+                            report_file="trivy-reports/trivy-lambda-${deployable}.json"
+
+                            process_lambda_artifact "${deployable}" "${zip_path}" "${extract_dir}" "${report_file}"
+                        done < <(jq -c '.artifacts[]' "${manifest_path}")
+                    }
+
+                    process_lambda_artifact() {
+                        local deployable="$1"
+                        local zip_path="$2"
+                        local extract_dir="$3"
+                        local report_file="$4"
+                        local critical_count
+                        local high_count
+
+                        if [ ! -f "${zip_path}" ]; then
+                            echo "ERROR: Missing lambda artifact ${zip_path}"
+                            add_summary "lambda" "${deployable}" "-" "-" "ERROR" "missing lambda zip"
+                            add_failure "${deployable}"
+                            return
+                        fi
+
+                        echo "=== Scanning lambda deployable ${deployable} (${zip_path}) ===" | tee -a "${LAMBDA_REPORT}"
+                        rm -rf "${extract_dir}"
+                        mkdir -p "${extract_dir}"
+                        unzip -q "${zip_path}" -d "${extract_dir}"
+                        [ -f "${extract_dir}/bootstrap" ] || {
+                            echo "ERROR: ${deployable} zip did not contain bootstrap"
+                            add_summary "lambda" "${deployable}" "-" "-" "ERROR" "zip missing bootstrap"
+                            add_failure "${deployable}"
+                            return
+                        }
+
+                        if ! trivy fs --quiet --no-progress --scanners vuln --severity "${TRIVY_SEVERITY}" --format json --output "${report_file}" "${extract_dir}"; then
+                            echo "ERROR: Trivy fs scan failed for ${deployable}"
+                            add_summary "lambda" "${deployable}" "-" "-" "ERROR" "trivy fs scan failed"
+                            add_failure "${deployable}"
+                            return
+                        fi
+
+                        critical_count="$(count_severity "${report_file}" "CRITICAL")"
+                        high_count="$(count_severity "${report_file}" "HIGH")"
+                        echo "${deployable}: CRITICAL=${critical_count}, HIGH=${high_count}" | tee -a "${LAMBDA_REPORT}"
+                        print_vuln_details "${report_file}" "lambda" "${deployable}" "${critical_count}" "${high_count}"
+
+                        if [ "${ENFORCE_VULN_THRESHOLDS}" = "true" ] && { [ "${critical_count}" -gt "${MAX_CRITICAL}" ] || [ "${high_count}" -gt "${MAX_HIGH}" ]; }; then
+                            add_summary "lambda" "${deployable}" "${critical_count}" "${high_count}" "BLOCKED" "threshold exceeded"
+                            add_failure "${deployable}"
+                            return
+                        fi
+
+                        add_summary "lambda" "${deployable}" "${critical_count}" "${high_count}" "PASSED" "eligible for S3 publish"
+                    }
+
+                    process_image_artifact() {
+                        local deployable="$1"
+                        local image_ref="$2"
+                        local report_file="trivy-reports/trivy-image-${deployable}.json"
+                        local critical_count
+                        local high_count
+                        local thresholds
+                        local allowed_max_critical
+                        local allowed_max_high
+
+                        if ! docker image inspect "${image_ref}" >/dev/null 2>&1; then
+                            echo "ERROR: Missing Docker image ${image_ref}"
+                            add_summary "image" "${deployable}" "-" "-" "ERROR" "docker image missing"
+                            add_failure "${deployable}"
+                            return
+                        fi
+
+                        echo "=== Scanning image deployable ${deployable} (${image_ref}) ===" | tee -a "${DOCKER_REPORT}"
+                        if ! trivy image --quiet --no-progress --scanners vuln --severity "${TRIVY_SEVERITY}" --format json --output "${report_file}" "${image_ref}"; then
+                            echo "ERROR: Trivy image scan failed for ${deployable}"
+                            add_summary "image" "${deployable}" "-" "-" "ERROR" "trivy image scan failed"
+                            add_failure "${deployable}"
+                            return
+                        fi
+
+                        critical_count="$(count_severity "${report_file}" "CRITICAL")"
+                        high_count="$(count_severity "${report_file}" "HIGH")"
+                        thresholds="$(resolve_image_thresholds "${deployable}")"
+                        allowed_max_critical="${thresholds%% *}"
+                        allowed_max_high="${thresholds##* }"
+                        echo "${deployable}: CRITICAL=${critical_count}, HIGH=${high_count}" | tee -a "${DOCKER_REPORT}"
+                        print_vuln_details "${report_file}" "image" "${deployable}" "${critical_count}" "${high_count}"
+
+                        if [ "${ENFORCE_VULN_THRESHOLDS}" = "true" ] && { [ "${critical_count}" -gt "${allowed_max_critical}" ] || [ "${high_count}" -gt "${allowed_max_high}" ]; }; then
+                            add_summary "image" "${deployable}" "${critical_count}" "${high_count}" "BLOCKED" "threshold exceeded (max C=${allowed_max_critical}, H=${allowed_max_high})"
+                            add_failure "${deployable}"
+                            return
+                        fi
+
+                        add_summary "image" "${deployable}" "${critical_count}" "${high_count}" "PASSED" "eligible for ECR publish"
+                    }
+
+                    process_lambda_bundle
+
+                    if [ "${SKIP_DOCKER_BUILDS}" = "true" ]; then
+                        add_summary "image" "headend-gateway" "-" "-" "SKIPPED" "docker builds skipped"
+                        add_summary "image" "pki-api" "-" "-" "SKIPPED" "docker builds skipped"
+                        add_summary "image" "stepca" "-" "-" "SKIPPED" "docker builds skipped"
+                        add_summary "image" "yardi-sync" "-" "-" "SKIPPED" "docker builds skipped"
+                    else
+                        process_image_artifact "headend-gateway" "headend-gateway:${GIT_COMMIT}"
+                        process_image_artifact "pki-api" "pki-api:${GIT_COMMIT}"
+                        process_image_artifact "stepca" "stepca:${GIT_COMMIT}"
+                        process_image_artifact "yardi-sync" "yardi-sync:${GIT_COMMIT}"
+                    fi
+
+                    echo "=== Security Scan Findings Summary ==="
+                    if command -v column >/dev/null 2>&1; then
+                        column -t -s $'\t' "${SUMMARY_FILE}"
+                    else
+                        cat "${SUMMARY_FILE}"
+                    fi
+
+                    if [ -n "${FAILED_DEPLOYABLES}" ]; then
+                        echo "FAILED_DEPLOYABLES=${FAILED_DEPLOYABLES}"
+                        exit 1
+                    fi
+
+                    echo "All deployables passed security scan and are eligible for publish."
+                '''
             }
         }
 
@@ -423,59 +651,33 @@ PYEOF
         // =====================================================================
         stage('CVE Gate') {
             steps {
-                sh """
+                sh """#!/usr/bin/env bash
+                    SUMMARY_FILE="trivy-reports/security-scan-summary.tsv"
+                    [ -f "\${SUMMARY_FILE}" ] || { echo "ERROR: Missing \${SUMMARY_FILE}"; exit 1; }
+
                     echo ""
                     echo "=== Security Scan Findings Summary ==="
-                    printf "%-8s %-25s %-10s %-6s\\n" "TYPE" "DEPLOYABLE" "CRITICAL" "HIGH"
+                    if command -v column >/dev/null 2>&1; then
+                        column -t -s $'\\t' "\${SUMMARY_FILE}"
+                    else
+                        cat "\${SUMMARY_FILE}"
+                    fi
 
-                    TOTAL_CRITICAL=0
-                    TOTAL_HIGH=0
-                    HAS_FINDINGS=0
-
-                    for CSV in \\
-                        trivy-reports/lambda-cve-summary.csv \\
-                        trivy-reports/docker-cve-summary.csv
-                    do
-                        [ -f "\${CSV}" ] || continue
-                        while IFS=',' read -r type path name critical high; do
-                            [ "\${type}" = "type" ] && continue
-                            printf "%-8s %-25s %-10s %-6s\\n" \\
-                                "\${type}" "\${name}" "\${critical}" "\${high}"
-                            TOTAL_CRITICAL=\$((TOTAL_CRITICAL + critical))
-                            TOTAL_HIGH=\$((TOTAL_HIGH + high))
-                            if [ "\${critical}" -gt 0 ] || [ "\${high}" -gt 0 ]; then
-                                HAS_FINDINGS=1
-                            fi
-                        done < "\${CSV}"
+                    HAS_DETAIL=0
+                    for DETAIL in trivy-reports/detail-*.txt; do
+                        [ -f "\${DETAIL}" ] || continue
+                        if [ "\${HAS_DETAIL}" -eq 0 ]; then
+                            echo ""
+                            echo "Vulnerability details for deployables with CRITICAL/HIGH findings:"
+                            HAS_DETAIL=1
+                        fi
+                        echo "--- \${DETAIL} ---"
+                        cat "\${DETAIL}"
+                        echo ""
                     done
 
-                    echo ""
-                    echo "Total: CRITICAL=\${TOTAL_CRITICAL}  HIGH=\${TOTAL_HIGH}"
-                    echo "Thresholds: MAX_CRITICAL=${params.MAX_CRITICAL}  MAX_HIGH=${params.MAX_HIGH}"
-
-                    if [ "\${HAS_FINDINGS}" -eq 1 ]; then
-                        echo ""
-                        echo "--- CVE Details (pipeline may still proceed if within thresholds) ---"
-                        for DETAIL in trivy-reports/detail-*.txt; do
-                            [ -f "\${DETAIL}" ] || continue
-                            cat "\${DETAIL}"
-                            echo ""
-                        done
-                    fi
-
-                    if [ "\${TOTAL_CRITICAL}" -gt "${params.MAX_CRITICAL}" ] || \\
-                       [ "\${TOTAL_HIGH}"     -gt "${params.MAX_HIGH}" ]; then
-                        echo ""
-                        echo "CVE GATE FAILED — CRITICAL=\${TOTAL_CRITICAL} (max ${params.MAX_CRITICAL})  HIGH=\${TOTAL_HIGH} (max ${params.MAX_HIGH})"
-                        echo "Publish blocked. Raise MAX_CRITICAL / MAX_HIGH in Build Parameters to allow, or fix the CVEs."
-                        exit 1
-                    fi
-
-                    echo ""
-                    if [ "\${HAS_FINDINGS}" -eq 0 ]; then
-                        echo "CVE gate passed — no findings. Proceeding to publish."
-                    else
-                        echo "CVE gate passed — findings are within configured thresholds. Proceeding to publish."
+                    if [ "\${HAS_DETAIL}" -eq 0 ]; then
+                        echo "No CRITICAL/HIGH vulnerability detail files were generated."
                     fi
                 """
             }
