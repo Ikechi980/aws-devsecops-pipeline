@@ -241,7 +241,6 @@ def tfPlan(String tfDir, String stackName) {
             echo "=== [${stackName}] terraform init ==="
             terraform init \\
                 -backend-config="${params.ENVIRONMENT}-backend.tfvars" \\
-                -reconfigure \\
                 -input=false
 
             echo "=== [${stackName}] terraform fmt -check ==="
