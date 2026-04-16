@@ -7,19 +7,37 @@
 //     ensure-cloud  → Infra-Ensure-cloud/iac/
 //     sentrics-core → infra-sentrics-core/iac/
 //
-//   Ordering — ensure-cloud reads sentrics-core remote state, so when
-//   STACK=both the stages always run sentrics-core first, then ensure-cloud.
+//   Dependency ordering
+//     ensure-cloud reads sentrics-core remote state, so:
+//       apply   — sentrics-core first, then ensure-cloud
+//       destroy — ensure-cloud first, then sentrics-core  (reverse)
 //
-//   1. Validate parameters
-//   2. Plan: sentrics-core   (when STACK=both|sentrics-core)
-//   3. Plan: ensure-cloud    (when STACK=both|ensure-cloud)
-//   4. [MANUAL GATE]         Human reviews plan(s) before apply
-//   5. Apply: sentrics-core  (when STACK=both|sentrics-core)
-//   6. Apply: ensure-cloud   (when STACK=both|ensure-cloud)
+//   Stages
+//     1.  Validate parameters
+//     2.  Plan: sentrics-core        (apply/plan)
+//     3.  Plan: ensure-cloud         (apply/plan)
+//     4.  [MANUAL GATE] Approve Apply
+//     5.  Apply: sentrics-core       (apply)
+//     6.  Apply: ensure-cloud        (apply)
+//     7.  Plan: ensure-cloud destroy (destroy)
+//     8.  Plan: sentrics-core destroy(destroy)
+//     9.  [MANUAL GATE] Approve Destroy
+//     10. Destroy: ensure-cloud      (destroy)
+//     11. Destroy: sentrics-core     (destroy)
 //
 // Usage
-//   Plan only  : ACTION=plan,  ENVIRONMENT=dev|prod, STACK=ensure-cloud|sentrics-core|both
-//   Plan+Apply : ACTION=apply, ENVIRONMENT=dev|prod, STACK=ensure-cloud|sentrics-core|both
+//   Plan only   : ACTION=plan,    ENVIRONMENT=dev|prod, STACK=...
+//   Plan+Apply  : ACTION=apply,   ENVIRONMENT=dev|prod, STACK=...
+//   Plan+Destroy: ACTION=destroy, ENVIRONMENT=dev|prod, STACK=...
+//
+// Caching
+//   TF_DATA_DIR is set to a persistent agent path so provider plugins and
+//   module sources survive cleanWs() and are not re-downloaded every run.
+//   First run per agent is slow; all subsequent runs skip the download.
+//   One-time setup on the agent:
+//     sudo mkdir -p /var/cache/jenkins/terraform-ensure-cloud
+//     sudo mkdir -p /var/cache/jenkins/terraform-sentrics-core
+//     sudo chown -R jenkins:jenkins /var/cache/jenkins
 // =============================================================================
 
 pipeline {
@@ -44,13 +62,13 @@ pipeline {
         )
         choice(
             name: 'ACTION',
-            choices: ['plan', 'apply'],
-            description: 'plan = show what would change | apply = plan + manual gate + apply'
+            choices: ['plan', 'apply', 'destroy'],
+            description: 'plan = show what would change | apply = plan + gate + apply | destroy = plan destroy + gate + destroy'
         )
         string(
             name: 'RELEASE_SHA',
             defaultValue: '',
-            description: 'Git commit SHA — replaces <RELEASE_SHA> in tfvars (Lambda S3 keys + ECS image tags). Required for apply; optional for a structural plan.'
+            description: 'Git commit SHA — replaces <RELEASE_SHA> in tfvars. Required for apply; not needed for plan or destroy.'
         )
         string(
             name: 'TF_LOG',
@@ -67,6 +85,11 @@ pipeline {
         // Root directories for each stack
         EC_TF_DIR = 'Infra-Ensure-cloud/iac'
         SC_TF_DIR = 'infra-sentrics-core/iac'
+
+        // Persistent Terraform data dirs — survive cleanWs() so provider plugins
+        // and module sources are only downloaded on the first run, not every run.
+        TF_DATA_DIR_EC = '/var/cache/jenkins/terraform-ensure-cloud'
+        TF_DATA_DIR_SC = '/var/cache/jenkins/terraform-sentrics-core'
     }
 
     stages {
@@ -80,8 +103,8 @@ pipeline {
                     if (!['dev', 'prod'].contains(params.ENVIRONMENT)) {
                         error("ENVIRONMENT must be 'dev' or 'prod'")
                     }
-                    if (!['plan', 'apply'].contains(params.ACTION)) {
-                        error("ACTION must be 'plan' or 'apply'")
+                    if (!['plan', 'apply', 'destroy'].contains(params.ACTION)) {
+                        error("ACTION must be 'plan', 'apply', or 'destroy'")
                     }
                     if (!['both', 'ensure-cloud', 'sentrics-core'].contains(params.STACK)) {
                         error("STACK must be 'both', 'ensure-cloud', or 'sentrics-core'")
@@ -93,18 +116,20 @@ pipeline {
                 echo "Stack       : ${params.STACK}"
                 echo "Environment : ${params.ENVIRONMENT}"
                 echo "Action      : ${params.ACTION}"
-                echo "Release SHA : ${params.RELEASE_SHA ?: '(none — structural plan only)'}"
+                echo "Release SHA : ${params.RELEASE_SHA ?: '(none)'}"
             }
         }
 
         // =====================================================================
-        // STAGE 2 — Plan: sentrics-core first
-        // ensure-cloud reads sentrics-core remote state, so this always runs
-        // before the ensure-cloud plan stage.
+        // STAGE 2 — Plan: sentrics-core
+        // Skipped for destroy (destroy has its own plan stages below).
         // =====================================================================
         stage('Plan: sentrics-core') {
             when {
-                expression { return params.STACK in ['both', 'sentrics-core'] }
+                allOf {
+                    expression { return params.ACTION in ['plan', 'apply'] }
+                    expression { return params.STACK in ['both', 'sentrics-core'] }
+                }
             }
             steps {
                 script { tfPlan(env.SC_TF_DIR, 'sentrics-core') }
@@ -112,11 +137,15 @@ pipeline {
         }
 
         // =====================================================================
-        // STAGE 3 — Plan: ensure-cloud (after sentrics-core state is current)
+        // STAGE 3 — Plan: ensure-cloud
+        // Skipped for destroy (destroy has its own plan stages below).
         // =====================================================================
         stage('Plan: ensure-cloud') {
             when {
-                expression { return params.STACK in ['both', 'ensure-cloud'] }
+                allOf {
+                    expression { return params.ACTION in ['plan', 'apply'] }
+                    expression { return params.STACK in ['both', 'ensure-cloud'] }
+                }
             }
             steps {
                 script { tfPlan(env.EC_TF_DIR, 'ensure-cloud') }
@@ -124,8 +153,7 @@ pipeline {
         }
 
         // =====================================================================
-        // STAGE 3 — Manual approval gate (apply only)
-        // Shows artifact links for every plan that was produced.
+        // STAGE 4 — Approve Apply
         // =====================================================================
         stage('Approve Apply') {
             when {
@@ -134,11 +162,11 @@ pipeline {
             steps {
                 script {
                     def links = []
-                    if (params.STACK in ['both', 'ensure-cloud']) {
-                        links << "${env.BUILD_URL}artifact/${env.EC_TF_DIR}/plan.txt  (ensure-cloud)"
-                    }
                     if (params.STACK in ['both', 'sentrics-core']) {
                         links << "${env.BUILD_URL}artifact/${env.SC_TF_DIR}/plan.txt  (sentrics-core)"
+                    }
+                    if (params.STACK in ['both', 'ensure-cloud']) {
+                        links << "${env.BUILD_URL}artifact/${env.EC_TF_DIR}/plan.txt  (ensure-cloud)"
                     }
                     input(
                         message: """\
@@ -176,7 +204,7 @@ ${links.join('\n')}
         }
 
         // =====================================================================
-        // STAGE 6 — Apply: ensure-cloud (sentrics-core state now updated)
+        // STAGE 6 — Apply: ensure-cloud
         // =====================================================================
         stage('Apply: ensure-cloud') {
             when {
@@ -189,6 +217,104 @@ ${links.join('\n')}
                 script { tfApply(env.EC_TF_DIR, 'ensure-cloud') }
             }
         }
+
+        // =====================================================================
+        // STAGE 7 — Plan Destroy: ensure-cloud first
+        // Destroy order is the reverse of apply: ensure-cloud depends on
+        // sentrics-core state, so it must be destroyed before sentrics-core.
+        // =====================================================================
+        stage('Plan Destroy: ensure-cloud') {
+            when {
+                allOf {
+                    expression { return params.ACTION == 'destroy' }
+                    expression { return params.STACK in ['both', 'ensure-cloud'] }
+                }
+            }
+            steps {
+                script { tfPlan(env.EC_TF_DIR, 'ensure-cloud', '-destroy') }
+            }
+        }
+
+        // =====================================================================
+        // STAGE 8 — Plan Destroy: sentrics-core
+        // =====================================================================
+        stage('Plan Destroy: sentrics-core') {
+            when {
+                allOf {
+                    expression { return params.ACTION == 'destroy' }
+                    expression { return params.STACK in ['both', 'sentrics-core'] }
+                }
+            }
+            steps {
+                script { tfPlan(env.SC_TF_DIR, 'sentrics-core', '-destroy') }
+            }
+        }
+
+        // =====================================================================
+        // STAGE 9 — Approve Destroy
+        // =====================================================================
+        stage('Approve Destroy') {
+            when {
+                expression { return params.ACTION == 'destroy' }
+            }
+            steps {
+                script {
+                    def links = []
+                    if (params.STACK in ['both', 'ensure-cloud']) {
+                        links << "${env.BUILD_URL}artifact/${env.EC_TF_DIR}/plan.txt  (ensure-cloud destroy)"
+                    }
+                    if (params.STACK in ['both', 'sentrics-core']) {
+                        links << "${env.BUILD_URL}artifact/${env.SC_TF_DIR}/plan.txt  (sentrics-core destroy)"
+                    }
+                    input(
+                        message: """\
+⚠️  DESTROY Terraform resources?
+
+  Stack       : ${params.STACK}
+  Environment : ${params.ENVIRONMENT}
+
+This will permanently delete infrastructure. Review destroy plans before approving:
+${links.join('\n')}
+""",
+                        ok: 'Yes, destroy',
+                        submitterParameter: 'APPROVER',
+                        timeout: 30,
+                        unit: 'MINUTES'
+                    )
+                    echo "Destroy approved by: ${env.APPROVER ?: 'unknown'}"
+                }
+            }
+        }
+
+        // =====================================================================
+        // STAGE 10 — Destroy: ensure-cloud first
+        // =====================================================================
+        stage('Destroy: ensure-cloud') {
+            when {
+                allOf {
+                    expression { return params.ACTION == 'destroy' }
+                    expression { return params.STACK in ['both', 'ensure-cloud'] }
+                }
+            }
+            steps {
+                script { tfApply(env.EC_TF_DIR, 'ensure-cloud') }
+            }
+        }
+
+        // =====================================================================
+        // STAGE 11 — Destroy: sentrics-core
+        // =====================================================================
+        stage('Destroy: sentrics-core') {
+            when {
+                allOf {
+                    expression { return params.ACTION == 'destroy' }
+                    expression { return params.STACK in ['both', 'sentrics-core'] }
+                }
+            }
+            steps {
+                script { tfApply(env.SC_TF_DIR, 'sentrics-core') }
+            }
+        }
     }
 
     post {
@@ -196,6 +322,8 @@ ${links.join('\n')}
             script {
                 if (params.ACTION == 'apply') {
                     echo "Infra apply PASSED — ${params.STACK}/${params.ENVIRONMENT} is up to date."
+                } else if (params.ACTION == 'destroy') {
+                    echo "Infra destroy PASSED — ${params.STACK}/${params.ENVIRONMENT} resources removed."
                 } else {
                     echo "Infra plan PASSED — review plan artifacts, then re-run with ACTION=apply."
                 }
@@ -215,14 +343,20 @@ ${links.join('\n')}
 }
 
 // =============================================================================
-// Shared helpers — called from both parallel branches
+// Shared helpers
 // =============================================================================
 
-def tfPlan(String tfDir, String stackName) {
+// tfPlan — runs init + fmt-check + validate + plan for a given stack.
+// Pass extraFlags='-destroy' to produce a destroy plan.
+def tfPlan(String tfDir, String stackName, String extraFlags = '') {
+    def tfDataDir = stackName == 'sentrics-core' ? env.TF_DATA_DIR_SC : env.TF_DATA_DIR_EC
+    def planLabel  = extraFlags.contains('-destroy') ? 'destroy plan' : 'plan'
     withCredentials([usernamePassword(credentialsId: 'github-pat', usernameVariable: 'GIT_USER', passwordVariable: 'GITHUB_PAT')]) {
     dir(tfDir) {
         sh """
             export TF_LOG="${params.TF_LOG}"
+            export TF_DATA_DIR="${tfDataDir}"
+            mkdir -p "${tfDataDir}"
 
             # Allow Terraform's git subprocess to clone private modules
             git config --global url."https://\${GITHUB_PAT}@github.com/".insteadOf "https://github.com/"
@@ -249,8 +383,9 @@ def tfPlan(String tfDir, String stackName) {
             echo "=== [${stackName}] terraform validate ==="
             terraform validate
 
-            echo "=== [${stackName}] terraform plan ==="
+            echo "=== [${stackName}] terraform ${planLabel} ==="
             terraform plan \\
+                ${extraFlags} \\
                 -var-file="\${VARS_WORK}" \\
                 -out=plan.tfplan \\
                 -input=false \\
@@ -273,11 +408,15 @@ def tfPlan(String tfDir, String stackName) {
     } // withCredentials
 }
 
+// tfApply — applies whatever plan.tfplan is in tfDir.
+// Used for both apply and destroy (the plan encodes the operation).
 def tfApply(String tfDir, String stackName) {
+    def tfDataDir = stackName == 'sentrics-core' ? env.TF_DATA_DIR_SC : env.TF_DATA_DIR_EC
     withCredentials([usernamePassword(credentialsId: 'github-pat', usernameVariable: 'GIT_USER', passwordVariable: 'GITHUB_PAT')]) {
     dir(tfDir) {
         sh """
             export TF_LOG="${params.TF_LOG}"
+            export TF_DATA_DIR="${tfDataDir}"
 
             git config --global url."https://\${GITHUB_PAT}@github.com/".insteadOf "https://github.com/"
 
