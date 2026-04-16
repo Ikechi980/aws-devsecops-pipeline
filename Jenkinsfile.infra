@@ -386,6 +386,7 @@ def tfPlan(String tfDir, String stackName, String extraFlags = '') {
             echo "=== [${stackName}] terraform ${planLabel} ==="
             terraform plan \\
                 ${extraFlags} \\
+                -parallelism=30 \\
                 -var-file="\${VARS_WORK}" \\
                 -out=plan.tfplan \\
                 -input=false \\
