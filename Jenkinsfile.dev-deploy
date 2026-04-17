@@ -55,8 +55,9 @@ pipeline {
                     if (!params.RELEASE_SHA?.trim()) {
                         error('RELEASE_SHA is required — this pipeline must be triggered by the build pipeline')
                     }
+                    env.RELEASE_SHA = params.RELEASE_SHA.trim()
                 }
-                echo "Deploying SHA: ${params.RELEASE_SHA} → dev"
+                echo "Deploying SHA: ${env.RELEASE_SHA} → dev"
             }
         }
 
