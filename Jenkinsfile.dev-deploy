@@ -141,7 +141,45 @@ pipeline {
         }
 
         // =====================================================================
-        // STAGE 4 — ECS deployments (parallel)
+        // STAGE 4 — Run DB Migration
+        // Invokes the migrate lambda synchronously before new app code starts.
+        // Fails the pipeline if the migration returns an error.
+        // =====================================================================
+        stage('Run DB Migration') {
+            steps {
+                sh '''
+                    echo "=== Invoking migrate lambda ==="
+
+                    STATUS_CODE=$(aws lambda invoke \
+                        --function-name "sentrics-core-db-migration-dev" \
+                        --invocation-type RequestResponse \
+                        --log-type Tail \
+                        --region "${AWS_REGION}" \
+                        --query 'StatusCode' \
+                        --output text \
+                        migration-response.json)
+
+                    echo "=== Migration response ==="
+                    cat migration-response.json
+
+                    if [ "${STATUS_CODE}" != "200" ]; then
+                        echo "Migration lambda HTTP error — StatusCode: ${STATUS_CODE}"
+                        exit 1
+                    fi
+
+                    if grep -q "errorMessage" migration-response.json; then
+                        echo "Migration lambda returned an error — see response above"
+                        exit 1
+                    fi
+
+                    echo "=== Migration succeeded ==="
+                '''
+            }
+        }
+
+        // =====================================================================
+        // STAGE 5 — ECS deployments (parallel)
+        // (previously STAGE 4)
         // Strategy: describe current task def → swap image → register new
         //           revision → update service with force-new-deployment
         // =====================================================================
@@ -291,7 +329,7 @@ pipeline {
         }
 
         // =====================================================================
-        // STAGE 5 — Wait for ECS services to reach steady state
+        // STAGE 6 — Wait for ECS services to reach steady state
         // aws ecs wait polls every 15s, times out at 10 minutes
         // =====================================================================
         stage('Wait for ECS Stability') {

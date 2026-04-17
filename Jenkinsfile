@@ -819,7 +819,36 @@ EOF
         }
 
         // =====================================================================
-        // STAGE 9 — Cache stats
+        // STAGE 8 — Approve dev deployment
+        // =====================================================================
+        stage('Approve Dev Deployment') {
+            steps {
+                input(
+                    message: "Deploy SHA ${env.GIT_COMMIT} to dev?",
+                    ok: 'Yes, deploy'
+                )
+            }
+        }
+
+        // =====================================================================
+        // STAGE 9 — Trigger dev deployment
+        // Passes the resolved SHA downstream so the deploy job uses the exact
+        // same artifacts that were just published.
+        // =====================================================================
+        stage('Trigger Dev Deployment') {
+            steps {
+                script {
+                    def sha = (params.RELEASE_SHA?.trim()) ?: env.GIT_COMMIT
+                    build job: 'jenkins-dev-deployment-update',
+                          parameters: [string(name: 'RELEASE_SHA', value: sha)],
+                          wait: false
+                    echo "Triggered jenkins-dev-deployment-update with SHA=${sha}"
+                }
+            }
+        }
+
+        // =====================================================================
+        // STAGE 10 — Cache stats
         // =====================================================================
         stage('Cache Stats') {
             steps {
