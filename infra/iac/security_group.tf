@@ -64,6 +64,16 @@ resource "aws_security_group_rule" "sns_endpoint_ingress_from_ecs_tasks" {
   description              = "HTTPS from ECS task SG to SNS endpoint"
 }
 
+resource "aws_security_group_rule" "sns_endpoint_ingress_from_ec_ecs_tasks" {
+  type                     = "ingress"
+  security_group_id        = aws_security_group.sns_endpoint.id
+  from_port                = 443
+  to_port                  = 443
+  protocol                 = "tcp"
+  source_security_group_id = aws_security_group.ecs_tasks.id
+  description              = "HTTPS from ensure-cloud ECS task SG to SNS endpoint"
+}
+
 resource "aws_security_group_rule" "lambda_ingress_from_sns_endpoint" {
   type                     = "ingress"
   security_group_id        = aws_security_group.lambda.id

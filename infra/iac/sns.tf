@@ -42,6 +42,7 @@ resource "aws_sns_topic_subscription" "core_change_events" {
   topic_arn = aws_sns_topic.core_change_events.arn
   protocol  = "sqs"
   endpoint  = aws_sqs_queue.core_change_events.arn
+  depends_on = [aws_sqs_queue_policy.core_change_events]
 }
 
 # Cross-stack fix: was data.terraform_remote_state.sentrics_core.outputs.resources_change_events_topic_arn
@@ -49,4 +50,5 @@ resource "aws_sns_topic_subscription" "sentrics_core_resources_change_events" {
   topic_arn = aws_sns_topic.resources_change_events.arn
   protocol  = "sqs"
   endpoint  = aws_sqs_queue.core_change_events.arn
+  depends_on = [aws_sqs_queue_policy.core_change_events]
 }

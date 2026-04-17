@@ -9,8 +9,9 @@ resource "aws_lambda_function" "api" {
   s3_bucket = var.lambda_s3_bucket
   s3_key    = var.api_lambda_s3_key
 
-  runtime = "provided.al2023"
-  handler = "bootstrap"
+  runtime       = "provided.al2023"
+  handler       = "bootstrap"
+  architectures = ["arm64"]
 
   timeout     = var.lambda_timeout_seconds
   memory_size = var.lambda_memory_mb
@@ -44,8 +45,9 @@ resource "aws_lambda_function" "migrate" {
   s3_bucket = var.lambda_s3_bucket
   s3_key    = var.migrate_lambda_s3_key
 
-  runtime = "provided.al2023"
-  handler = "bootstrap"
+  runtime       = "provided.al2023"
+  handler       = "bootstrap"
+  architectures = ["arm64"]
 
   timeout     = var.lambda_timeout_seconds
   memory_size = var.lambda_memory_mb
@@ -78,8 +80,9 @@ resource "aws_lambda_function" "resources_change_logger" {
   s3_bucket = var.change_logger_lambda_s3_bucket
   s3_key    = var.change_logger_lambda_s3_key
 
-  runtime = "provided.al2023"
-  handler = "bootstrap"
+  runtime       = "provided.al2023"
+  handler       = "bootstrap"
+  architectures = ["arm64"]
 
   timeout     = var.change_logger_lambda_timeout_seconds
   memory_size = var.change_logger_lambda_memory_mb
@@ -114,6 +117,7 @@ resource "aws_lambda_function" "headend_api" {
   role          = aws_iam_role.lambda_headend_api.arn
   handler       = "bootstrap"
   runtime       = "provided.al2023"
+  architectures = ["arm64"]
   s3_bucket     = var.lambda_s3_bucket
   s3_key        = var.lambda_headend_api_s3_key
 
@@ -141,6 +145,12 @@ resource "aws_lambda_function" "headend_api" {
   }
 
   tags = var.tags
+
+  depends_on = [
+    aws_iam_role_policy_attachment.lambda_headend_api_basic,
+    aws_iam_role_policy_attachment.lambda_headend_api_vpc,
+    aws_iam_role_policy_attachment.lambda_headend_api_ssm
+  ]
 }
 
 resource "aws_lambda_function" "core_change_publisher" {
@@ -148,6 +158,7 @@ resource "aws_lambda_function" "core_change_publisher" {
   role          = aws_iam_role.lambda_core_change_publisher.arn
   handler       = "bootstrap"
   runtime       = "provided.al2023"
+  architectures = ["arm64"]
   s3_bucket     = var.lambda_s3_bucket
   s3_key        = var.lambda_core_change_publisher_s3_key
 
@@ -171,6 +182,13 @@ resource "aws_lambda_function" "core_change_publisher" {
   }
 
   tags = var.tags
+
+  depends_on = [
+    aws_iam_role_policy_attachment.lambda_core_change_publisher_basic,
+    aws_iam_role_policy_attachment.lambda_core_change_publisher_vpc,
+    aws_iam_role_policy_attachment.lambda_core_change_publisher_ssm,
+    aws_iam_role_policy.lambda_core_change_publisher
+  ]
 }
 
 resource "aws_lambda_event_source_mapping" "core_change_events" {

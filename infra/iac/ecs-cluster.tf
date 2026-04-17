@@ -17,6 +17,11 @@ resource "aws_ecs_task_definition" "yardi_sync" {
   execution_role_arn       = var.ecs_task_role_arn
   task_role_arn            = var.ecs_task_role_arn
 
+  runtime_platform {
+    operating_system_family = "LINUX"
+    cpu_architecture        = "ARM64"
+  }
+
   container_definitions = templatefile("${path.module}/${var.ecs_task_definition_file}", {
     ecs_container_image = var.ecs_container_image
   })
@@ -42,6 +47,8 @@ module "ecs_service" {
   environment = var.environment
   project     = var.project_name
   owner       = lookup(var.tags, "Owner", "")
+
+  depends_on = [module.ecs_logs]
 }
 
 module "ecs_logs" {
@@ -84,6 +91,11 @@ resource "aws_ecs_task_definition" "ecs_task_definitions" {
   execution_role_arn       = var.ecs_execution_role_arn
   task_role_arn            = var.ecs_task_role_arn
 
+  runtime_platform {
+    operating_system_family = "LINUX"
+    cpu_architecture        = "ARM64"
+  }
+
   container_definitions = templatefile(each.value.task_definition_template_file, {
     ecs_container_image = var.ecs_task_images[each.key]
     ecs_log_group       = "/ecs/${var.environment}-${each.key}"
@@ -125,6 +137,11 @@ module "Ecs-service" {
   environment = var.environment
   project     = var.project
   owner       = var.owner
+
+  depends_on = [
+    module.ec_ecs_logs,
+    aws_lb_listener.headend_gateway_https
+  ]
 }
 
 resource "aws_ecs_service" "pki_api" {
@@ -149,6 +166,11 @@ resource "aws_ecs_service" "pki_api" {
   deployment_maximum_percent         = 200
 
   tags = merge({ Environment = var.environment, Project = var.project, Owner = var.owner }, var.tags)
+
+  depends_on = [
+    module.ec_ecs_logs,
+    aws_ecs_service.stepca
+  ]
 }
 
 resource "aws_ecs_service" "stepca" {
@@ -174,6 +196,8 @@ resource "aws_ecs_service" "stepca" {
   deployment_maximum_percent         = 100
 
   tags = merge({ Environment = var.environment, Project = var.project, Owner = var.owner }, var.tags)
+
+  depends_on = [module.ec_ecs_logs]
 }
 
 module "ec_ecs_logs" {

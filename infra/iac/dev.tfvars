@@ -33,8 +33,8 @@ database_identifier       = "sentrics-core-db"
 db_subnet_group_name      = "sentrics-core-db-subnets"
 db_parameter_group_name   = "sentrics-core-db-pg"
 
-api_lambda_s3_key     = "lambda-artifacts/resources-api/resources-api-<RELEASE_SHA>.zip"
-migrate_lambda_s3_key = "lambda-artifacts/migrate/migrate-<RELEASE_SHA>.zip"
+api_lambda_s3_key     = "lambda-artifacts/resources-api/resources-api-716be987659995183d9842af2506acfdba5343f3.zip"
+migrate_lambda_s3_key = "lambda-artifacts/migrate/migrate-716be987659995183d9842af2506acfdba5343f3.zip"
 
 lambda_timeout_seconds = 30
 lambda_memory_mb       = 512
@@ -65,7 +65,7 @@ yardi_sync_dlq_name      = "sentrics-core-yardi-sync-dlq"
 
 change_logger_lambda_name      = "sentrics-core-resources-change-logger"
 change_logger_lambda_s3_bucket = "sentrics-ensure-lambda-artifacts-truststore"
-change_logger_lambda_s3_key    = "lambda-artifacts/resources-change-logger/resources-change-logger-<RELEASE_SHA>.zip"
+change_logger_lambda_s3_key    = "lambda-artifacts/resources-change-logger/resources-change-logger-716be987659995183d9842af2506acfdba5343f3.zip"
 change_logger_iam_policy_name  = "resources-change-logger-access"
 
 cluster_map = {
@@ -85,7 +85,7 @@ ecs_security_groups = ["sg-0698efad48a5d0596"]
 
 ecs_task_definition_family         = "yardi-sync"
 ecs_task_definition_file           = "yardi-sync-taskdef.json.template"
-ecs_container_image                = "892234674906.dkr.ecr.us-east-1.amazonaws.com/sentrics-core-yardi-sync-repo:<RELEASE_SHA>"
+ecs_container_image                = "892234674906.dkr.ecr.us-east-1.amazonaws.com/sentrics-core-yardi-sync-repo:716be987659995183d9842af2506acfdba5343f3"
 ecs_task_cpu                       = "512"
 ecs_task_memory                    = "1024"
 ecs_service_desired_count          = 1
@@ -114,8 +114,8 @@ headend_api_rust_log                       = "info"
 core_change_publisher_systems_api_base_url = "https://dev.ems.ensurelink.net"
 core_change_publisher_rust_log             = "info"
 
-lambda_headend_api_s3_key           = "lambda-artifacts/headend-api/headend-api-<RELEASE_SHA>.zip"
-lambda_core_change_publisher_s3_key = "lambda-artifacts/core-change-publisher/core-change-publisher-<RELEASE_SHA>.zip"
+lambda_headend_api_s3_key           = "lambda-artifacts/headend-api/headend-api-716be987659995183d9842af2506acfdba5343f3.zip"
+lambda_core_change_publisher_s3_key = "lambda-artifacts/core-change-publisher/core-change-publisher-716be987659995183d9842af2506acfdba5343f3.zip"
 
 ec_cluster_map = {
   main = {
@@ -135,9 +135,9 @@ scale_out_cooldown  = 60
 ecs_log_services = ["headend-gateway", "pki-api", "stepca"]
 
 ecs_task_images = {
-  headend-gateway = "892234674906.dkr.ecr.us-east-1.amazonaws.com/ensure-cloud-headend-gateway:<RELEASE_SHA>"
-  pki-api         = "892234674906.dkr.ecr.us-east-1.amazonaws.com/ensure-cloud-pki-api:<RELEASE_SHA>"
-  stepca          = "892234674906.dkr.ecr.us-east-1.amazonaws.com/ensure-cloud-stepca:<RELEASE_SHA>"
+  headend-gateway = "892234674906.dkr.ecr.us-east-1.amazonaws.com/ensure-cloud-headend-gateway:716be987659995183d9842af2506acfdba5343f3"
+  pki-api         = "892234674906.dkr.ecr.us-east-1.amazonaws.com/ensure-cloud-pki-api:716be987659995183d9842af2506acfdba5343f3"
+  stepca          = "892234674906.dkr.ecr.us-east-1.amazonaws.com/ensure-cloud-stepca:716be987659995183d9842af2506acfdba5343f3"
 }
 
 alb_certificate_arn    = "arn:aws:acm:us-east-1:892234674906:certificate/55ee4701-8efb-48e7-b35c-3d83c4f92575"

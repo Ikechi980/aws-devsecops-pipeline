@@ -27,16 +27,32 @@ resource "aws_dynamodb_table" "resources_change_log" {
 
   global_secondary_index {
     name            = "by_resource"
-    hash_key        = "resource_pk"
-    range_key       = "timestamp_sk"
     projection_type = "ALL"
+
+    key_schema {
+      attribute_name = "resource_pk"
+      key_type       = "HASH"
+    }
+
+    key_schema {
+      attribute_name = "timestamp_sk"
+      key_type       = "RANGE"
+    }
   }
 
   global_secondary_index {
     name            = "by_requester"
-    hash_key        = "requester_pk"
-    range_key       = "timestamp_sk"
     projection_type = "ALL"
+
+    key_schema {
+      attribute_name = "requester_pk"
+      key_type       = "HASH"
+    }
+
+    key_schema {
+      attribute_name = "timestamp_sk"
+      key_type       = "RANGE"
+    }
   }
 
   tags = local.merged_tags
