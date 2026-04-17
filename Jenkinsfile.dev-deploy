@@ -19,7 +19,7 @@ pipeline {
     agent any
 
     options {
-        buildDiscarder(logRotator(numToKeepStr: '30'))
+        buildDiscarder(logRotator(numToKeepStr: '2'))
         timeout(time: 30, unit: 'MINUTES')
         disableConcurrentBuilds()
     }
@@ -329,32 +329,6 @@ pipeline {
             }
         }
 
-        // =====================================================================
-        // STAGE 6 — Wait for ECS services to reach steady state
-        // aws ecs wait polls every 15s, times out at 10 minutes
-        // =====================================================================
-        stage('Wait for ECS Stability') {
-            steps {
-                sh '''
-                    echo "=== Waiting for ensure-cloud services ==="
-                    aws ecs wait services-stable \
-                        --cluster  "${EC_CLUSTER}" \
-                        --services \
-                            "ensure-cloud-dev-headend-gateway-service" \
-                            "ensure-cloud-dev-pki-api-service" \
-                            "ensure-cloud-dev-stepca-service" \
-                        --region   "${AWS_REGION}"
-
-                    echo "=== Waiting for sentrics-core services ==="
-                    aws ecs wait services-stable \
-                        --cluster  "${SC_CLUSTER}" \
-                        --services "sentrics-core-dev-yardi-sync-service" \
-                        --region   "${AWS_REGION}"
-
-                    echo "=== All ECS services stable — dev deploy complete ==="
-                '''
-            }
-        }
     }
 
     post {
