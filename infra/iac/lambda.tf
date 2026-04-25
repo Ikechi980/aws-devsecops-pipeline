@@ -24,9 +24,9 @@ resource "aws_lambda_function" "api" {
 
   environment {
     variables = {
-      RUST_LOG      = "info"
-      SNS_TOPIC_ARN = aws_sns_topic.resources_change_events.arn
-      DATABASE_URL  = "postgres://${var.database_username}:${urlencode(random_password.db.result)}@${aws_db_instance.this.address}:${var.database_port}/${var.database_name}"
+      RUST_LOG                   = "info"
+      SNS_TOPIC_ARN              = aws_sns_topic.resources_change_events.arn
+      DATABASE_URL_SSM_PARAMETER = aws_ssm_parameter.database_url.name
     }
   }
 
@@ -34,7 +34,8 @@ resource "aws_lambda_function" "api" {
 
   depends_on = [
     aws_iam_role_policy_attachment.lambda_basic_logs,
-    aws_iam_role_policy_attachment.lambda_vpc_access
+    aws_iam_role_policy_attachment.lambda_vpc_access,
+    aws_iam_role_policy.lambda_exec_ssm,
   ]
 }
 
@@ -60,8 +61,8 @@ resource "aws_lambda_function" "migrate" {
 
   environment {
     variables = {
-      RUST_LOG     = "info"
-      DATABASE_URL = "postgres://${var.database_username}:${urlencode(random_password.db.result)}@${aws_db_instance.this.address}:${var.database_port}/${var.database_name}"
+      RUST_LOG                   = "info"
+      DATABASE_URL_SSM_PARAMETER = aws_ssm_parameter.database_url.name
     }
   }
 
@@ -69,7 +70,8 @@ resource "aws_lambda_function" "migrate" {
 
   depends_on = [
     aws_iam_role_policy_attachment.lambda_basic_logs,
-    aws_iam_role_policy_attachment.lambda_vpc_access
+    aws_iam_role_policy_attachment.lambda_vpc_access,
+    aws_iam_role_policy.lambda_exec_ssm,
   ]
 }
 

@@ -44,3 +44,10 @@ resource "aws_db_instance" "this" {
 
   tags = local.merged_tags
 }
+
+resource "aws_ssm_parameter" "database_url" {
+  name  = "/sentrics-core/${var.environment}/database-url"
+  type  = "SecureString"
+  value = "postgres://${var.database_username}:${urlencode(random_password.db.result)}@${aws_db_instance.this.address}:${var.database_port}/${var.database_name}"
+  tags  = local.merged_tags
+}

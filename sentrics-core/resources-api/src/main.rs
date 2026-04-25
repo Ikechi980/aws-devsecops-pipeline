@@ -35,8 +35,25 @@ async fn main() -> Result<(), Error> {
         tracing::info!("Production authentication mode - Cognito/IAM required");
     }
 
-    let database_url = env::var("DATABASE_URL").expect("DATABASE_URL must be set");
     let sns_topic_arn = env::var("SNS_TOPIC_ARN").expect("SNS_TOPIC_ARN must be set");
+
+    let aws_config = aws_config::load_from_env().await;
+
+    let database_url = {
+        let param_name = env::var("DATABASE_URL_SSM_PARAMETER")
+            .expect("DATABASE_URL_SSM_PARAMETER must be set");
+        aws_sdk_ssm::Client::new(&aws_config)
+            .get_parameter()
+            .name(&param_name)
+            .with_decryption(true)
+            .send()
+            .await
+            .expect("Failed to fetch database URL from SSM")
+            .parameter
+            .expect("SSM parameter not found")
+            .value
+            .expect("SSM parameter has no value")
+    };
 
     let pool = PgPoolOptions::new()
         .max_connections(5)
@@ -50,7 +67,6 @@ async fn main() -> Result<(), Error> {
 
     tracing::info!("Database pool created successfully");
 
-    let aws_config = aws_config::load_from_env().await;
     let sns_client = aws_sdk_sns::Client::new(&aws_config);
 
     let publisher = EventPublisher::new(sns_client, sns_topic_arn);

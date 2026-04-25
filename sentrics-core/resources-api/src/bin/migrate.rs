@@ -12,16 +12,13 @@ struct Response {
     message: String,
 }
 
-async fn function_handler(_event: LambdaEvent<Request>) -> Result<Response, Error> {
+async fn function_handler(_event: LambdaEvent<Request>, database_url: &str) -> Result<Response, Error> {
     tracing::info!("Starting database migration");
-
-    let database_url =
-        env::var("DATABASE_URL").map_err(|_| "DATABASE_URL environment variable must be set")?;
 
     let pool = PgPoolOptions::new()
         .max_connections(1)
         .acquire_timeout(std::time::Duration::from_secs(3))
-        .connect(&database_url)
+        .connect(database_url)
         .await
         .map_err(|e| format!("Failed to connect to database: {}", e))?;
 
@@ -54,5 +51,23 @@ async fn main() -> Result<(), Error> {
 
     tracing::info!("Initializing migration Lambda function");
 
-    lambda_runtime::run(service_fn(function_handler)).await
+    let aws_config = aws_config::load_from_env().await;
+
+    let database_url = {
+        let param_name = env::var("DATABASE_URL_SSM_PARAMETER")
+            .map_err(|_| "DATABASE_URL_SSM_PARAMETER must be set")?;
+        aws_sdk_ssm::Client::new(&aws_config)
+            .get_parameter()
+            .name(&param_name)
+            .with_decryption(true)
+            .send()
+            .await
+            .map_err(|e| format!("Failed to fetch database URL from SSM: {}", e))?
+            .parameter
+            .ok_or("SSM parameter not found")?
+            .value
+            .ok_or("SSM parameter has no value")?
+    };
+
+    lambda_runtime::run(service_fn(|event| function_handler(event, &database_url))).await
 }
