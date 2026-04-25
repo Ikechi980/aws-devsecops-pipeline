@@ -1,0 +1,32 @@
+name: Infrastructure Security Gates
+
+on:
+  push:
+    branches:
+      - development
+  pull_request:
+    branches:
+      - development
+
+concurrency:
+  group: infra-security-gates
+  cancel-in-progress: false
+
+jobs:
+  security_scan:
+    name: security-scan
+    runs-on: [self-hosted, Linux, X64]
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check runner prerequisites
+        run: ./scripts/ci/prereqs.sh security
+
+      - name: Run security gate
+        run: ./scripts/check.sh security
