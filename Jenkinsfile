@@ -406,7 +406,7 @@ EOF
                 sh '''#!/usr/bin/env bash
                     set -euo pipefail
 
-                    mkdir -p trivy-reports
+                    mkdir -p trivy-reports sbom-reports
                     SUMMARY_FILE="trivy-reports/security-scan-summary.tsv"
                     LAMBDA_REPORT="trivy-reports/trivy-lambda-scan.txt"
                     DOCKER_REPORT="trivy-reports/trivy-docker-scan.txt"
@@ -573,6 +573,10 @@ EOF
                             return
                         fi
 
+                        trivy fs --quiet --no-progress --format cyclonedx \
+                            --output "sbom-reports/sbom-lambda-${deployable}.cdx.json" \
+                            "${extract_dir}" || true
+
                         critical_count="$(count_severity "${report_file}" "CRITICAL")"
                         high_count="$(count_severity "${report_file}" "HIGH")"
                         echo "${deployable}: CRITICAL=${critical_count}, HIGH=${high_count}" | tee -a "${LAMBDA_REPORT}"
@@ -611,6 +615,10 @@ EOF
                             add_failure "${deployable}"
                             return
                         fi
+
+                        trivy image --quiet --no-progress --format cyclonedx \
+                            --output "sbom-reports/sbom-image-${deployable}.cdx.json" \
+                            "${image_ref}" || true
 
                         critical_count="$(count_severity "${report_file}" "CRITICAL")"
                         high_count="$(count_severity "${report_file}" "HIGH")"
@@ -663,6 +671,7 @@ EOF
                 archiveArtifacts artifacts: 'ensure-cloud/out/**/*',   allowEmptyArchive: false
                 archiveArtifacts artifacts: 'sentrics-core/out/**/*',  allowEmptyArchive: false
                 archiveArtifacts artifacts: 'trivy-reports/**/*',      allowEmptyArchive: true
+                archiveArtifacts artifacts: 'sbom-reports/**/*',       allowEmptyArchive: true
                 script {
                     if (!params.SKIP_DOCKER_BUILDS) {
                         archiveArtifacts artifacts: 'docker-out/**/*', allowEmptyArchive: false
@@ -755,6 +764,16 @@ EOF
                     aws s3 cp sentrics-core/out/resources-change-logger.zip \
                         "s3://${ARTIFACT_BUCKET}/lambda-artifacts/resources-change-logger/resources-change-logger-${SHA}.zip"
                     echo "=== Lambda zips pushed ==="
+
+                    echo "=== Pushing Lambda SBOMs to S3 ==="
+                    for SBOM_FILE in sbom-reports/sbom-lambda-*.cdx.json; do
+                        [ -f "${SBOM_FILE}" ] || continue
+                        DEPLOYABLE="$(basename "${SBOM_FILE}" .cdx.json | sed 's/sbom-lambda-//')"
+                        aws s3 cp "${SBOM_FILE}" \
+                            "s3://${ARTIFACT_BUCKET}/builds/${SHA}/sbom/lambda-${DEPLOYABLE}.cdx.json"
+                        echo "  SBOM: lambda-${DEPLOYABLE}.cdx.json"
+                    done
+                    echo "=== Lambda SBOMs pushed ==="
                 '''
                 script {
                     if (!params.SKIP_DOCKER_BUILDS) {
@@ -778,6 +797,16 @@ EOF
                             docker push "${ECR_REGISTRY}/sentrics-core-yardi-sync-repo:${SHA}"
                             echo "Pushed ${ECR_REGISTRY}/sentrics-core-yardi-sync-repo:${SHA}"
                             echo "=== Docker images pushed ==="
+
+                            echo "=== Pushing image SBOMs to S3 ==="
+                            for SBOM_FILE in sbom-reports/sbom-image-*.cdx.json; do
+                                [ -f "${SBOM_FILE}" ] || continue
+                                DEPLOYABLE="$(basename "${SBOM_FILE}" .cdx.json | sed 's/sbom-image-//')"
+                                aws s3 cp "${SBOM_FILE}" \
+                                    "s3://${ARTIFACT_BUCKET}/builds/${SHA}/sbom/image-${DEPLOYABLE}.cdx.json"
+                                echo "  SBOM: image-${DEPLOYABLE}.cdx.json"
+                            done
+                            echo "=== Image SBOMs pushed ==="
                         '''
                     }
                 }
@@ -808,6 +837,17 @@ EOF
                                 "pki-api":         ($ecr + "/ensure-cloud-pki-api:"                + $commit),
                                 "stepca":          ($ecr + "/ensure-cloud-stepca:"                 + $commit),
                                 "yardi-sync":      ($ecr + "/sentrics-core-yardi-sync-repo:"       + $commit)
+                            },
+                            sboms: {
+                                "headend-api":             ("s3://" + $bucket + "/builds/" + $commit + "/sbom/lambda-headend-api.cdx.json"),
+                                "core-change-publisher":   ("s3://" + $bucket + "/builds/" + $commit + "/sbom/lambda-core-change-publisher.cdx.json"),
+                                "resources-api":           ("s3://" + $bucket + "/builds/" + $commit + "/sbom/lambda-resources-api.cdx.json"),
+                                "migrate":                 ("s3://" + $bucket + "/builds/" + $commit + "/sbom/lambda-migrate.cdx.json"),
+                                "resources-change-logger": ("s3://" + $bucket + "/builds/" + $commit + "/sbom/lambda-resources-change-logger.cdx.json"),
+                                "headend-gateway":         ("s3://" + $bucket + "/builds/" + $commit + "/sbom/image-headend-gateway.cdx.json"),
+                                "pki-api":                 ("s3://" + $bucket + "/builds/" + $commit + "/sbom/image-pki-api.cdx.json"),
+                                "stepca":                  ("s3://" + $bucket + "/builds/" + $commit + "/sbom/image-stepca.cdx.json"),
+                                "yardi-sync":              ("s3://" + $bucket + "/builds/" + $commit + "/sbom/image-yardi-sync.cdx.json")
                             }
                         }' > /tmp/manifest.json
 
