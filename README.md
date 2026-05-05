@@ -140,10 +140,14 @@ flowchart TD
 
     subgraph DEPLOY["Jenkins — Deploy Pipeline"]
         direction TB
-        D1[Download Manifest] --> D2[Deploy Lambdas\nParallel]
-        D2 --> D3[Run DB Migration]
-        D3 --> D4[Deploy ECS Services\nParallel]
-        D4 --> D5[Wait for ECS Stability]
+        D1[Capture Rollback State] --> D2[Download Manifest]
+        D2 --> D3[Deploy Lambdas\nParallel]
+        D3 --> D4[Run DB Migration]
+        D4 --> D5[Deploy ECS Services\nParallel]
+        D5 --> D6[Wait for ECS Stability]
+        D6 --> D7{All healthy?}
+        D7 -->|no — post failure| D8[Automated Rollback\nre-deploy previous SHA]
+        D7 -->|yes| D9[Done]
     end
 
     J10 --> DEPLOY
@@ -167,6 +171,8 @@ flowchart TD
 | Container runtime | Distroless + non-root UID 65532 | All Docker images |
 | Network auth | mTLS on ALB and API Gateway v2 | AWS ingress |
 | IAM | Least-privilege per Lambda/ECS task | Terraform |
+| Runtime security | AWS GuardDuty — ECS Fargate agent + Lambda network logs | AWS — HIGH/CRITICAL findings → SNS |
+| Automated rollback | Re-deploy previous artifact SHA on any deploy failure | Jenkins deploy pipeline |
 
 ---
 

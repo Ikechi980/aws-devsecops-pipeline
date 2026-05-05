@@ -65,6 +65,7 @@ infra/
     ├── sns.tf                  # SNS topics
     ├── sqs.tf                  # SQS queues and DLQs
     ├── dynamodb.tf             # DynamoDB tables
+    ├── guardduty.tf            # GuardDuty detector, ECS runtime monitoring, findings → SNS
     ├── outputs.tf              # Stack outputs
     ├── dev.tfvars              # Development environment values
     ├── prod.tfvars             # Production environment values
