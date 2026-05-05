@@ -5,14 +5,23 @@
 // Downloads the manifest from S3 and deploys all services to dev.
 //
 //   1. Validate parameters
-//   2. Download manifest from S3
-//   3. Deploy Lambdas (parallel)
+//   2. Capture rollback state — records the currently running SHA before
+//      any changes are made so we can restore it automatically on failure
+//   3. Download manifest from S3
+//   4. Deploy Lambdas (parallel)
 //      ├─ ensure-cloud : headend-api | core-change-publisher
 //      └─ sentrics-core: resources-api | migrate | resources-change-logger
-//   4. Deploy ECS services (parallel)
+//   5. Run DB Migration
+//   6. Deploy ECS services (parallel)
 //      ├─ ensure-cloud : headend-gateway | pki-api | stepca
 //      └─ sentrics-core: yardi-sync
-//   5. Wait for ECS stability
+//   7. Wait for ECS stability
+//
+// Rollback
+//   If any stage after Capture Rollback State fails, the post.failure block
+//   automatically re-deploys all Lambdas and ECS services to the previously
+//   running SHA. The migrate Lambda is deliberately skipped during rollback
+//   because migrations are forward-only and cannot be automatically reversed.
 // =============================================================================
 
 pipeline {
@@ -62,7 +71,52 @@ pipeline {
         }
 
         // =====================================================================
-        // STAGE 2 — Download manifest
+        // STAGE 2 — Capture Rollback State
+        // Read the currently running image tag from ECS before making any
+        // changes. Stored in env.ROLLBACK_SHA for use in post.failure.
+        // Skipped gracefully on first deploy (no running service yet).
+        // =====================================================================
+        stage('Capture Rollback State') {
+            steps {
+                sh '''#!/usr/bin/env bash
+                    set -euo pipefail
+
+                    ROLLBACK_SHA=""
+
+                    TASK_DEF_ARN=$(aws ecs describe-services \
+                        --cluster "${EC_CLUSTER}" \
+                        --services "ensure-cloud-dev-headend-gateway-service" \
+                        --region  "${AWS_REGION}" \
+                        --query   'services[0].taskDefinition' \
+                        --output  text 2>/dev/null || true)
+
+                    if [ -n "${TASK_DEF_ARN}" ] && [ "${TASK_DEF_ARN}" != "None" ]; then
+                        CURRENT_IMAGE=$(aws ecs describe-task-definition \
+                            --task-definition "${TASK_DEF_ARN}" \
+                            --region "${AWS_REGION}" \
+                            --query  'taskDefinition.containerDefinitions[0].image' \
+                            --output text 2>/dev/null || true)
+
+                        ROLLBACK_SHA="${CURRENT_IMAGE##*:}"
+                    fi
+
+                    if [ -n "${ROLLBACK_SHA}" ] && [ "${ROLLBACK_SHA}" != "${RELEASE_SHA}" ]; then
+                        echo "Rollback SHA captured: ${ROLLBACK_SHA}"
+                    else
+                        echo "No rollback SHA available (first deploy or same SHA) — proceeding without rollback safety net"
+                        ROLLBACK_SHA=""
+                    fi
+
+                    echo "${ROLLBACK_SHA}" > rollback-sha.txt
+                '''
+                script {
+                    env.ROLLBACK_SHA = sh(script: 'cat rollback-sha.txt', returnStdout: true).trim()
+                }
+            }
+        }
+
+        // =====================================================================
+        // STAGE 3 — Download manifest
         // =====================================================================
         stage('Download Manifest') {
             steps {
@@ -79,7 +133,7 @@ pipeline {
         }
 
         // =====================================================================
-        // STAGE 3 — Lambda deployments (parallel)
+        // STAGE 4 — Lambda deployments (parallel)
         // =====================================================================
         stage('Deploy Lambdas') {
             parallel {
@@ -142,7 +196,7 @@ pipeline {
         }
 
         // =====================================================================
-        // STAGE 4 — Run DB Migration
+        // STAGE 5 — Run DB Migration
         // Invokes the migrate lambda synchronously before new app code starts.
         // Fails the pipeline if the migration returns an error.
         // =====================================================================
@@ -179,8 +233,7 @@ pipeline {
         }
 
         // =====================================================================
-        // STAGE 5 — ECS deployments (parallel)
-        // (previously STAGE 4)
+        // STAGE 6 — ECS deployments (parallel)
         // Strategy: describe current task def → swap image → register new
         //           revision → update service with force-new-deployment
         // =====================================================================
@@ -329,15 +382,178 @@ pipeline {
             }
         }
 
+        // =====================================================================
+        // STAGE 7 — Wait for ECS Stability
+        // Blocks until all ECS services reach a steady running state.
+        // Failure here triggers the rollback in post.failure.
+        // =====================================================================
+        stage('Wait for ECS Stability') {
+            steps {
+                sh '''#!/usr/bin/env bash
+                    set -euo pipefail
+
+                    echo "=== Waiting for ensure-cloud ECS services to stabilise ==="
+                    aws ecs wait services-stable \
+                        --cluster "${EC_CLUSTER}" \
+                        --services \
+                            "ensure-cloud-dev-headend-gateway-service" \
+                            "ensure-cloud-dev-pki-api-service" \
+                            "ensure-cloud-dev-stepca-service" \
+                        --region "${AWS_REGION}"
+
+                    echo "=== Waiting for sentrics-core ECS services to stabilise ==="
+                    aws ecs wait services-stable \
+                        --cluster "${SC_CLUSTER}" \
+                        --services \
+                            "sentrics-core-dev-yardi-sync-service" \
+                        --region "${AWS_REGION}"
+
+                    echo "=== All ECS services stable ==="
+                '''
+            }
+        }
+
     }
 
+    // =========================================================================
+    // Post-pipeline actions
+    // =========================================================================
     post {
         success {
             echo "Dev deployment PASSED — SHA ${params.RELEASE_SHA} is live in dev."
         }
+
         failure {
-            echo "Dev deployment FAILED for SHA ${params.RELEASE_SHA} — check stage logs above."
+            script {
+                if (env.ROLLBACK_SHA?.trim()) {
+                    echo "Deploy FAILED — initiating automatic rollback to ${env.ROLLBACK_SHA}"
+                    sh '''#!/usr/bin/env bash
+                        set -euo pipefail
+
+                        echo "=========================================="
+                        echo "AUTOMATIC ROLLBACK → ${ROLLBACK_SHA}"
+                        echo "=========================================="
+
+                        # Verify the rollback manifest exists in S3
+                        aws s3 cp \
+                            "s3://${ARTIFACT_BUCKET}/builds/${ROLLBACK_SHA}/manifest.json" \
+                            rollback-manifest.json \
+                            --region "${AWS_REGION}" || {
+                            echo "ERROR: Rollback manifest not found for ${ROLLBACK_SHA} — manual intervention required"
+                            exit 1
+                        }
+
+                        echo "=== Rolling back Lambdas to ${ROLLBACK_SHA} ==="
+
+                        aws lambda update-function-code \
+                            --function-name "ensure-cloud-dev-headend-api" \
+                            --s3-bucket    "${ARTIFACT_BUCKET}" \
+                            --s3-key       "lambda-artifacts/headend-api/headend-api-${ROLLBACK_SHA}.zip" \
+                            --region       "${AWS_REGION}"
+
+                        aws lambda update-function-code \
+                            --function-name "ensure-cloud-dev-core-change-publisher" \
+                            --s3-bucket    "${ARTIFACT_BUCKET}" \
+                            --s3-key       "lambda-artifacts/core-change-publisher/core-change-publisher-${ROLLBACK_SHA}.zip" \
+                            --region       "${AWS_REGION}"
+
+                        aws lambda update-function-code \
+                            --function-name "sentrics-core-resources-api-dev" \
+                            --s3-bucket    "${ARTIFACT_BUCKET}" \
+                            --s3-key       "lambda-artifacts/resources-api/resources-api-${ROLLBACK_SHA}.zip" \
+                            --region       "${AWS_REGION}"
+
+                        aws lambda update-function-code \
+                            --function-name "sentrics-core-resources-change-logger-dev" \
+                            --s3-bucket    "${ARTIFACT_BUCKET}" \
+                            --s3-key       "lambda-artifacts/resources-change-logger/resources-change-logger-${ROLLBACK_SHA}.zip" \
+                            --region       "${AWS_REGION}"
+
+                        # migrate Lambda deliberately skipped — migrations are
+                        # forward-only and cannot be automatically reversed
+                        echo "migrate Lambda skipped — schema changes are forward-only"
+
+                        echo "=== Rolling back ECS services to ${ROLLBACK_SHA} ==="
+
+                        rollback_ecs_service() {
+                            local cluster="$1"
+                            local family="$2"
+                            local service="$3"
+                            local image="$4"
+
+                            NEW_TASK_DEF=$(aws ecs describe-task-definition \
+                                --task-definition "${family}" \
+                                --query 'taskDefinition' \
+                                --output json \
+                                --region "${AWS_REGION}" \
+                                | jq --arg IMAGE "${image}" \
+                                    '.containerDefinitions[0].image = $IMAGE' \
+                                | jq 'del(.taskDefinitionArn,.revision,.status,.requiresAttributes,.compatibilities,.registeredAt,.registeredBy)')
+
+                            NEW_ARN=$(aws ecs register-task-definition \
+                                --cli-input-json "${NEW_TASK_DEF}" \
+                                --query 'taskDefinition.taskDefinitionArn' \
+                                --output text \
+                                --region "${AWS_REGION}")
+
+                            aws ecs update-service \
+                                --cluster         "${cluster}" \
+                                --service         "${service}" \
+                                --task-definition "${NEW_ARN}" \
+                                --force-new-deployment \
+                                --region          "${AWS_REGION}"
+
+                            echo "Rolled back ${service} → ${NEW_ARN}"
+                        }
+
+                        rollback_ecs_service \
+                            "${EC_CLUSTER}" \
+                            "ensure-cloud-dev-headend-gateway-task" \
+                            "ensure-cloud-dev-headend-gateway-service" \
+                            "${ECR_REGISTRY}/ensure-cloud-headend-gateway:${ROLLBACK_SHA}"
+
+                        rollback_ecs_service \
+                            "${EC_CLUSTER}" \
+                            "ensure-cloud-dev-pki-api-task" \
+                            "ensure-cloud-dev-pki-api-service" \
+                            "${ECR_REGISTRY}/ensure-cloud-pki-api:${ROLLBACK_SHA}"
+
+                        rollback_ecs_service \
+                            "${EC_CLUSTER}" \
+                            "ensure-cloud-dev-stepca-task" \
+                            "ensure-cloud-dev-stepca-service" \
+                            "${ECR_REGISTRY}/ensure-cloud-stepca:${ROLLBACK_SHA}"
+
+                        rollback_ecs_service \
+                            "${SC_CLUSTER}" \
+                            "yardi-sync-dev" \
+                            "sentrics-core-dev-yardi-sync-service" \
+                            "${ECR_REGISTRY}/sentrics-core-yardi-sync-repo:${ROLLBACK_SHA}"
+
+                        echo "=== Waiting for rollback ECS stability ==="
+                        aws ecs wait services-stable \
+                            --cluster "${EC_CLUSTER}" \
+                            --services \
+                                "ensure-cloud-dev-headend-gateway-service" \
+                                "ensure-cloud-dev-pki-api-service" \
+                                "ensure-cloud-dev-stepca-service" \
+                            --region "${AWS_REGION}"
+
+                        aws ecs wait services-stable \
+                            --cluster "${SC_CLUSTER}" \
+                            --services "sentrics-core-dev-yardi-sync-service" \
+                            --region "${AWS_REGION}"
+
+                        echo "=========================================="
+                        echo "ROLLBACK COMPLETE — ${ROLLBACK_SHA} is live"
+                        echo "=========================================="
+                    '''
+                } else {
+                    echo "Deploy FAILED — no rollback SHA available (first deploy). Manual intervention required."
+                }
+            }
         }
+
         always {
             cleanWs()
         }
